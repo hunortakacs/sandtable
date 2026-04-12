@@ -2,7 +2,15 @@
 	import { onMount } from 'svelte';
 	import colors from 'tailwindcss/colors';
 	import { sendPatternFragments } from './websocket';
-	import { currentFile, machineStats, position, prevPosition, sendingPattern, sentPacketCount, totalPacketCount } from './stores';
+	import {
+		currentFile,
+		machineStats,
+		position,
+		prevPosition,
+		sendingPattern,
+		sentPacketCount,
+		totalPacketCount
+	} from './stores';
 	const { amber, orange, yellow } = colors;
 
 	export let patterns: string[];
@@ -10,10 +18,14 @@
 	export let height = 490;
 	export let line = 10;
 
-	const maxWidth = width - line;
-	const maxHeight = height - line;
+	let maxWidth = width - line;
+	let maxHeight = height - line;
+
+	$: maxWidth = width - line;
+	$: maxHeight = height - line;
 
 	let pointNums: number[] = [];
+	let useCenteredBounds = true;
 
 	let canvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null;
@@ -117,7 +129,7 @@
 		return tokens;
 	}
 
-	function scaleNums(nums: number[]) {
+	function scaleNums(nums: number[], centered: boolean) {
 		if (nums.length < 2) return nums;
 
 		let minX = nums[0];
@@ -135,14 +147,21 @@
 
 		const fullWidth = maxX - minX;
 		const fullHeight = maxY - minY;
+		const safeWidth = fullWidth === 0 ? 1 : fullWidth;
+		const safeHeight = fullHeight === 0 ? 1 : fullHeight;
 
-		const scale = Math.min(1, maxWidth / fullWidth, maxHeight / fullHeight);
-		const offsetX = line / 2 + (maxWidth - fullWidth*scale) / 2;
-		const offsetY = line / 2 + (maxHeight - fullHeight*scale) / 2;
+		// Always downscale to fit if needed, never upscale.
+		const scale = Math.min(1, maxWidth / safeWidth, maxHeight / safeHeight);
+		const offsetX = centered
+			? line / 2 + (maxWidth - fullWidth * scale) / 2
+			: line / 2;
+		const offsetY = centered
+			? line / 2 + (maxHeight - fullHeight * scale) / 2
+			: line / 2;
 
 		for (let i = 0; i < nums.length; i += 2) {
-			nums[i] = (nums[i] - minX) * scale + offsetX;
-			nums[i + 1] = (nums[i + 1] - minY) * scale + offsetY;
+			nums[i] = centered ? (nums[i] - minX) * scale + offsetX : nums[i] * scale + offsetX;
+			nums[i + 1] = centered ? (nums[i + 1] - minY) * scale + offsetY : nums[i + 1] * scale + offsetY;
 		}
 
 		return nums;
@@ -152,19 +171,30 @@
 		let nums: number[] = [];
 		let x: number = 0;
 		let y: number = 0;
-		for (let line of lines) {
-			line.trim();
-			if (line.startsWith(';') || line == '') continue;
+		for (const rawLine of lines) {
+			const line = rawLine.split(';')[0].trim();
+			if (line === '') continue;
 
 			const tokens = tokenizeGCodeLine(line);
-			if ('G' in tokens && tokens['G'] == 1) {
+			if ('G' in tokens && (tokens['G'] == 0 || tokens['G'] == 1)) {
 				if ('X' in tokens) x = parseFloat(tokens['X'].toString());
 				if ('Y' in tokens) y = parseFloat(tokens['Y'].toString());
 
 				nums.push(x, y);
 			}
 		}
-		return scaleNums(nums);
+		return scaleNums(nums, useCenteredBounds);
+	}
+
+	function refreshPreviewFromLines() {
+		if (lines.length === 0) return;
+		pointNums = parseGcode(lines);
+		drawPoints(pointNums);
+	}
+
+	function toggleBoundsMode() {
+		useCenteredBounds = !useCenteredBounds;
+		refreshPreviewFromLines();
 	}
 
 	let patternSelector: HTMLSelectElement;
@@ -277,7 +307,7 @@
 			onchange={(e) => handleFileChange(e)}
 		/>
 		<label for="gcode" class="btn">
-			<span class="hidden sm:block">Upload</span>
+			<!-- <span class="hidden sm:block">Upload</span> -->
 			<i class="fa-solid fa-upload"></i>
 		</label>
 		<select
@@ -296,6 +326,14 @@
 		<button class="btn" onclick={() => drawPoints(pointNums, 1)} aria-label="preview">
 			<i class="fa-solid fa-eye"></i>
 		</button>
+		<button
+			class="btn"
+			onclick={toggleBoundsMode}
+			aria-label="toggle bounds mode"
+			title={useCenteredBounds ? 'Centered mode' : 'Keep origin mode'}
+		>
+			<span>{useCenteredBounds ? 'Cnt' : 'Org'}</span>
+		</button>
 		{#if $sendingPattern}
 			<button class="btn" aria-label="sending progress">
 				{$sentPacketCount} / {$totalPacketCount}
@@ -306,7 +344,7 @@
 				onclick={() => sendPatternFragments(pointNums, patternName)}
 				disabled={patternName == ''}
 			>
-				<span class="hidden sm:block">Send</span>
+				<!-- <span class="hidden sm:block">Send</span> -->
 				<i class="fa-solid fa-paper-plane"></i>
 			</button>
 		{/if}
