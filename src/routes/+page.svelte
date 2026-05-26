@@ -2,6 +2,7 @@
 	import StopButton from '$lib/StopButton.svelte';
 	import ResumePauseButton from '$lib/ResumePauseButton.svelte';
 	import Canvas from '$lib/Canvas.svelte';
+	import CanvasControls from '$lib/CanvasControls.svelte';
 	import MovementControl from '$lib/MovementControl.svelte';
 	import Stats from '$lib/Stats.svelte';
 	import { closeSocket, openSocket } from '$lib/websocket';
@@ -12,9 +13,13 @@
 	import FanControl from '$lib/FanControl.svelte';
 	import SafemodeButton from '$lib/SafemodeButton.svelte';
 	import Patterns from '$lib/Patterns.svelte';
+	import Queue from '$lib/Queue.svelte';
 	import LogLevelButton from '$lib/LogLevelButton.svelte';
 
 	export let data: PageData;
+
+	let canvasComponent: any;
+	let pointNums: number[] = [];
 
 	onMount(() => {
 		openSocket(data.websocket_password);
@@ -38,8 +43,15 @@
 		<FanControl />
 	</div>
 </div>
+
 <Stats />
-<div class="flex gap-4 flex-wrap">
-	<Canvas patterns={data.patterns} />
-	<Patterns />
+
+<div class="flex gap-4 flex-wrap justify-center items-start w-full">
+	<Canvas bind:this={canvasComponent} bind:pointNums />
+
+	<div class="flex flex-col gap-4 w-full max-w-md">
+		<CanvasControls {canvasComponent} bind:pointNums patterns={data.patterns} />
+		<Queue />
+		<Patterns />
+	</div>
 </div>

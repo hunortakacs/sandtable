@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { espConnected, machineStats, position, socketState } from './stores';
+	import { espConnected, machineStats, position, socketState, playbackMode } from './stores';
 
 	type socketStates = { [code: number]: { name: string; color: string; icon: string } };
 	const states: socketStates = {
@@ -10,6 +10,7 @@
 	};
 	const machineStates: { [state: number]: string } = {};
 </script>
+
 <div class="flex gap-2 flex-wrap justify-center">
 	<div class="stats">
 		<div class="stat">
@@ -51,7 +52,7 @@
 				{#if $machineStats.homing}
 					Homing
 				{:else if $machineStats.executing}
-					Executing
+					Playing ({$playbackMode === 1 ? 'Queue' : $playbackMode === 2 ? 'Shuffle' : 'Manual'})
 				{:else if $machineStats.busy}
 					Busy
 				{:else}
