@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import colors from 'tailwindcss/colors';
 	import { machineStats, position, prevPosition } from './stores';
 	const { orange } = colors;
@@ -35,17 +36,26 @@
 		bgCtx?.clearRect(0, 0, canvas.width, canvas.height);
 	}
 
-	// Loads the pattern the ESP reports as currently playing: the whole shape
-	// is redrawn fresh on the faint background layer (a pure function of
-	// pointNums, so it's safe to call again for the same pattern — e.g. on
-	// every reconnect — unlike compositing/fading previous frames), and the
-	// portion already traversed (per `progress`, a byte offset from the
-	// firmware, 4 bytes/coordinate) is instantly filled in on the foreground
-	// layer in the darker "already drawn" color. This is what makes progress
-	// survive a page reload instead of starting the preview from scratch.
-	export function loadDevicePattern(newLines: string[], progress: number) {
-		lines = newLines;
-		pointNums = parseGcode(lines);
+	// Loads the pattern the ESP reports as currently playing, from its own
+	// compiled coordinate bytes (decoded by the caller into raw x/y pairs) —
+	// the only source of truth for what the machine is actually drawing,
+	// since an uploaded/queued pattern has no corresponding static .gcode
+	// asset on the frontend to re-parse. These numbers were already fit to
+	// canvas space by scaleNums() once, at upload time (that's what got
+	// encoded into the .bin the ESP is reading from), so — unlike
+	// processLines()'s freshly-parsed-gcode path — they must NOT be scaled
+	// again here.
+	//
+	// The whole shape is redrawn fresh on the faint background layer (a pure
+	// function of pointNums, so it's safe to call again for the same pattern
+	// — e.g. on every reconnect — unlike compositing/fading previous
+	// frames), and the portion already traversed (per `progress`, a byte
+	// offset from the firmware, 4 bytes/coordinate) is instantly filled in on
+	// the foreground layer in the darker "already drawn" color. This is what
+	// makes progress survive a page reload instead of starting the preview
+	// from scratch.
+	export function loadDeviceCoordinates(rawPointNums: number[], progress: number) {
+		pointNums = rawPointNums;
 		if (!ctx || !bgCtx || !canvas) return;
 
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -54,8 +64,24 @@
 			draw(pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3], orange[300], orange[200], bgCtx);
 		}
 
-		if (progress > 0) {
-			drawUpTo(Math.floor(progress / 4) * 2);
+		if (progress > 0 && pointNums.length >= 2) {
+			// progress is a hard lower bound — the machine has *definitely*
+			// reached this point, but we don't know how far it's gotten past
+			// it. Fill in solid up to there, then connect straight to the
+			// machine's actual live reported position for the remainder,
+			// rather than guessing at some further index — matching what the
+			// live position-tracking draw below does continuously anyway.
+			const certainIndex = Math.min(Math.floor(progress / 4) * 2, pointNums.length - 2);
+			drawUpTo(certainIndex);
+			const livePos = get(position);
+			draw(
+				pointNums[certainIndex],
+				pointNums[certainIndex + 1],
+				livePos.x,
+				livePos.y,
+				orange[400],
+				orange[300]
+			);
 		}
 	}
 

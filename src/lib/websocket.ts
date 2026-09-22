@@ -64,12 +64,65 @@ export enum WSCmdType_t {
 	WSCmdType_FILE_META = 0x1d,
 	WSCmdType_CANCEL_UPLOAD = 0x1e,
 	WSCmdType_SKIP = 0x1f,
-	WSCmdType_PREVIOUS = 0x20
+	WSCmdType_PREVIOUS = 0x20,
+	WSCmdType_PATTERN_DATA = 0x21
 }
 
 export let ws: WebSocket;
 
 let ackResolve: ((ok: boolean) => void) | null = null;
+
+// Only the most recently requested pattern's data is ever wanted — e.g.
+// currentFile can change again (skip, autoclean transition) before a
+// previous, possibly multi-second, download finishes. A single slot here
+// (rather than one per request) meant a newer request silently clobbered an
+// older one's resolver: when the ESP's response for the OLD request
+// eventually arrived, it resolved the NEW promise with the wrong bytes, and
+// the old promise was left to time out uselessly 20s later — the exact
+// "Pattern data request timed out" / "have to refresh" symptom. Now a newer
+// request immediately (and cleanly) rejects whatever was still pending, and
+// the response is matched by filename so a stale reply can't be misapplied.
+let currentPatternDataRequest: {
+	resolve: (bytes: Uint8Array) => void;
+	reject: (err: Error) => void;
+	filename: string;
+} | null = null;
+
+// Requests the exact compiled coordinate bytes the ESP has stored for
+// `filename` (whatever it's currently reading, or any other pattern it
+// knows about) — this is the actual source of truth for what the machine is
+// drawing, unlike the static bundled /patterns/*.gcode assets, which only
+// cover the built-in demo library and never exist for anything uploaded or
+// queued by the user.
+export async function requestPatternData(filename: string, timeoutMs = 20000): Promise<Uint8Array> {
+	if (currentPatternDataRequest) {
+		currentPatternDataRequest.reject(new Error('Superseded by a newer pattern data request'));
+		currentPatternDataRequest = null;
+	}
+
+	return new Promise<Uint8Array>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			if (currentPatternDataRequest?.resolve !== resolve) return;
+			currentPatternDataRequest = null;
+			reject(new Error('Pattern data request timed out'));
+		}, timeoutMs);
+
+		currentPatternDataRequest = {
+			resolve: (bytes: Uint8Array) => {
+				clearTimeout(timer);
+				resolve(bytes);
+			},
+			reject: (err: Error) => {
+				clearTimeout(timer);
+				reject(err);
+			},
+			filename
+		};
+
+		const charArray = new TextEncoder().encode(filename);
+		ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PATTERN_DATA, ...charArray, 0x00]));
+	});
+}
 
 // Resolves with false when the ESP's ack payload carries an explicit failure
 // byte (currently only PATTERN_FIN does, on a checksum mismatch) — every
@@ -188,6 +241,19 @@ function handleBinaryMessage(data: any) {
 			decoder = new TextDecoder('utf-8');
 			currentFile.set(decoder.decode(charArray.slice(5, charArray.length - 1)));
 			patternProgress.set(offset === 0xffffffff ? -1 : offset);
+			break;
+		}
+		case WSCmdType_t.WSCmdType_PATTERN_DATA: {
+			// Payload: [cmd(1)] [filename...\0] [coordinate bytes...]
+			charArray = new Uint8Array(dataView.buffer);
+			let nameEnd = 1;
+			while (nameEnd < charArray.length && charArray[nameEnd] !== 0) nameEnd++;
+			const filename = new TextDecoder('utf-8').decode(charArray.slice(1, nameEnd));
+			const bytes = charArray.slice(nameEnd + 1);
+			if (currentPatternDataRequest && currentPatternDataRequest.filename === filename) {
+				currentPatternDataRequest.resolve(bytes);
+				currentPatternDataRequest = null;
+			}
 			break;
 		}
 		case WSCmdType_t.WSCmdType_ESP_STATE:

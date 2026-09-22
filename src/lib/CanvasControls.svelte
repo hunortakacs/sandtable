@@ -7,7 +7,7 @@
 		currentFile,
 		patternProgress
 	} from './stores';
-	import { sendCancelUpload, sendPatternFragments } from './websocket';
+	import { sendCancelUpload, sendPatternFragments, requestPatternData } from './websocket';
 
 	export let patterns: string[];
 	export let canvasComponent: any;
@@ -24,31 +24,43 @@
 		patternName = 'pattern';
 	}
 
-	// `fromDevice`: true when this load is following the ESP's own currentFile
-	// report (as opposed to the user manually browsing/authoring a pattern) —
-	// draws the whole shape as a faint background plus whatever's already
-	// been traversed (per patternProgress) instead of the animated full
-	// preview, and survives a page reload since it's re-derived fresh each time.
-	async function handlePatternChange(fromDevice = false) {
+	async function handlePatternChange() {
 		let selected = patternSelector.value;
 		if (!selected) return;
 
-		if (!fromDevice) patternName = selected.replace('.gcode', '');
+		patternName = selected.replace('.gcode', '');
 
 		try {
 			const response = await fetch(`/patterns/${selected}`);
 			if (response.ok) {
 				const content = await response.text();
-				if (canvasComponent) {
-					if (fromDevice) {
-						canvasComponent.loadDevicePattern(content.split('\n'), $patternProgress);
-					} else {
-						canvasComponent.processLines(content.split('\n'));
-					}
-				}
+				if (canvasComponent) canvasComponent.processLines(content.split('\n'));
 			}
 		} catch (error) {
 			console.error("Couldn't fetch pattern from files.");
+		}
+	}
+
+	// Redraws whatever the ESP reports as currently playing, from its own
+	// compiled pattern data — the only source of truth for an uploaded/queued
+	// pattern, which has no matching static .gcode asset on the frontend to
+	// re-fetch by filename. Decodes the same 4-bytes-per-coordinate,
+	// x100-scaled format the firmware reads from and the upload path writes
+	// (see websocket.ts's sendPacket / file_handler.cpp's getNextCoordinate).
+	async function loadFromDevice(filename: string) {
+		try {
+			const raw = await requestPatternData(filename);
+			if (raw.length === 0) {
+				console.error(`Device has no data for ${filename}`);
+				return;
+			}
+			const numPoints = Math.floor(raw.length / 2);
+			const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+			const nums: number[] = new Array(numPoints);
+			for (let i = 0; i < numPoints; i++) nums[i] = view.getUint16(i * 2) / 100;
+			if (canvasComponent) canvasComponent.loadDeviceCoordinates(nums, $patternProgress);
+		} catch (error) {
+			console.error("Couldn't fetch the currently-playing pattern from the device.", error);
 		}
 	}
 
@@ -81,14 +93,7 @@
 			return;
 		}
 		patternName = $currentFile.replace('/', '').replace('.bin', '');
-
-		if (!patternSelector) return;
-		const mapped = $currentFile.replace('.bin', '.gcode');
-		const exists = Array.from(patternSelector.options).some((opt) => opt.value === mapped);
-		if (exists) {
-			patternSelector.value = mapped;
-			handlePatternChange(true);
-		}
+		loadFromDevice($currentFile);
 	});
 </script>
 
