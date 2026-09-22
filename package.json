@@ -39,5 +39,8 @@
 		"daisyui": "^4.12.23",
 		"pusher": "^5.2.0",
 		"typescript-cubic-spline": "^1.0.1"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": ["esbuild"]
 	}
 }
