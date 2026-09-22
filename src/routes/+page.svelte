@@ -1,5 +1,7 @@
 <script lang="ts">
 	import StopButton from '$lib/StopButton.svelte';
+	import SkipButton from '$lib/SkipButton.svelte';
+	import PreviousButton from '$lib/PreviousButton.svelte';
 	import ResumePauseButton from '$lib/ResumePauseButton.svelte';
 	import Canvas from '$lib/Canvas.svelte';
 	import CanvasControls from '$lib/CanvasControls.svelte';
@@ -31,8 +33,10 @@
 
 <div class="flex gap-4 w-full flex-wrap justify-center items-center">
 	<MovementControl />
-	<div class="grid gap-1 grid-cols-2">
+	<div class="grid gap-1 grid-cols-3">
+		<PreviousButton />
 		<ResumePauseButton />
+		<SkipButton />
 		<SafemodeButton />
 		<StopButton />
 		<LogLevelButton />

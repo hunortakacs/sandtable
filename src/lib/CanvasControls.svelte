@@ -1,5 +1,12 @@
 <script lang="ts">
-	import { sendingPattern, sentPacketCount, totalPacketCount, currentFile } from './stores';
+	import {
+		sendingPattern,
+		uploadError,
+		sentPacketCount,
+		totalPacketCount,
+		currentFile,
+		patternProgress
+	} from './stores';
 	import { sendCancelUpload, sendPatternFragments } from './websocket';
 
 	export let patterns: string[];
@@ -17,17 +24,28 @@
 		patternName = 'pattern';
 	}
 
-	async function handlePatternChange() {
+	// `fromDevice`: true when this load is following the ESP's own currentFile
+	// report (as opposed to the user manually browsing/authoring a pattern) —
+	// draws the whole shape as a faint background plus whatever's already
+	// been traversed (per patternProgress) instead of the animated full
+	// preview, and survives a page reload since it's re-derived fresh each time.
+	async function handlePatternChange(fromDevice = false) {
 		let selected = patternSelector.value;
 		if (!selected) return;
 
-		patternName = selected.replace('.gcode', '');
+		if (!fromDevice) patternName = selected.replace('.gcode', '');
 
 		try {
 			const response = await fetch(`/patterns/${selected}`);
 			if (response.ok) {
 				const content = await response.text();
-				if (canvasComponent) canvasComponent.processLines(content.split('\n'));
+				if (canvasComponent) {
+					if (fromDevice) {
+						canvasComponent.loadDevicePattern(content.split('\n'), $patternProgress);
+					} else {
+						canvasComponent.processLines(content.split('\n'));
+					}
+				}
 			}
 		} catch (error) {
 			console.error("Couldn't fetch pattern from files.");
@@ -58,12 +76,18 @@
 	}
 
 	currentFile.subscribe(($currentFile) => {
+		if (!$currentFile) {
+			if (canvasComponent) canvasComponent.clear();
+			return;
+		}
+		patternName = $currentFile.replace('/', '').replace('.bin', '');
+
 		if (!patternSelector) return;
 		const mapped = $currentFile.replace('.bin', '.gcode');
 		const exists = Array.from(patternSelector.options).some((opt) => opt.value === mapped);
-		if (exists && patternSelector.value !== mapped) {
+		if (exists) {
 			patternSelector.value = mapped;
-			handlePatternChange();
+			handlePatternChange(true);
 		}
 	});
 </script>
@@ -93,7 +117,7 @@
 		<select
 			bind:this={patternSelector}
 			class="select select-bordered w-full font-semibold"
-			onchange={handlePatternChange}
+			onchange={() => handlePatternChange()}
 			onfocus={() => {
 				patternSelector.selectedIndex = 0;
 			}}
@@ -124,6 +148,13 @@
 		</div>
 
 		<div class="divider my-0"></div>
+
+		{#if $uploadError}
+			<div class="alert alert-error text-sm py-2">
+				<i class="fa-solid fa-triangle-exclamation"></i>
+				<span>{$uploadError}</span>
+			</div>
+		{/if}
 
 		{#if $sendingPattern}
 			<div class="flex gap-2 w-full">

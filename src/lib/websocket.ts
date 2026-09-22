@@ -5,7 +5,9 @@ import {
 	machineStats,
 	socketState,
 	sendingPattern,
+	uploadError,
 	currentFile,
+	patternProgress,
 	position,
 	feedrate,
 	led,
@@ -60,15 +62,20 @@ export enum WSCmdType_t {
 	WSCmdType_PLAY_SHUFFLE = 0x1b,
 	WSCmdType_AUTOCLEAN = 0x1c,
 	WSCmdType_FILE_META = 0x1d,
-	WSCmdType_CANCEL_UPLOAD = 0x1e
+	WSCmdType_CANCEL_UPLOAD = 0x1e,
+	WSCmdType_SKIP = 0x1f,
+	WSCmdType_PREVIOUS = 0x20
 }
 
 export let ws: WebSocket;
 
-let ackResolve: (() => void) | null = null;
+let ackResolve: ((ok: boolean) => void) | null = null;
 
-export async function waitForAck(timeoutMs = 10000) {
-	return new Promise<void>((resolve, reject) => {
+// Resolves with false when the ESP's ack payload carries an explicit failure
+// byte (currently only PATTERN_FIN does, on a checksum mismatch) — every
+// other ack is a bare success.
+export async function waitForAck(timeoutMs = 10000): Promise<boolean> {
+	return new Promise<boolean>((resolve, reject) => {
 		let isDone = false;
 		const timer = setTimeout(() => {
 			if (isDone) return;
@@ -77,14 +84,15 @@ export async function waitForAck(timeoutMs = 10000) {
 			reject(new Error('ACK Timeout - ESP32 stopped responding'));
 		}, timeoutMs);
 
-		ackResolve = () => {
+		ackResolve = (ok: boolean) => {
 			if (isDone) return;
 			isDone = true;
 			clearTimeout(timer);
-			resolve();
+			resolve(ok);
 		};
 	});
 }
+
 
 function handleBinaryMessage(data: any) {
 	const dataView = new DataView(data);
@@ -95,10 +103,12 @@ function handleBinaryMessage(data: any) {
 	let decoder: TextDecoder;
 	let charArray: Uint8Array;
 	switch (cmdByte as WSCmdType_t) {
-		case WSCmdType_t.WSCmdType_ACK:
-			if (ackResolve) ackResolve();
+		case WSCmdType_t.WSCmdType_ACK: {
+			const ok = dataView.byteLength < 2 || dataView.getUint8(1) !== 0;
+			if (ackResolve) ackResolve(ok);
 			ackResolve = null;
 			break;
+		}
 		case WSCmdType_t.WSCmdType_POSITION:
 			prevPosition.set(get(position));
 			position.set({
@@ -171,12 +181,15 @@ function handleBinaryMessage(data: any) {
 			}
 			queue.set(qFiles);
 			break;
-		case WSCmdType_t.WSCmdType_CURRENT_FILE:
+		case WSCmdType_t.WSCmdType_CURRENT_FILE: {
 			console.log('Current file received');
+			const offset = dataView.getUint32(1);
 			charArray = new Uint8Array(dataView.buffer);
 			decoder = new TextDecoder('utf-8');
-			currentFile.set(decoder.decode(charArray.slice(1, charArray.length - 1)));
+			currentFile.set(decoder.decode(charArray.slice(5, charArray.length - 1)));
+			patternProgress.set(offset === 0xffffffff ? -1 : offset);
 			break;
+		}
 		case WSCmdType_t.WSCmdType_ESP_STATE:
 			espConnected.set(dataView.getUint8(1) > 0);
 			if (get(espConnected) == true) {
@@ -247,6 +260,14 @@ export function sendResume() {
 
 export function sendStop() {
 	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_STOP]));
+}
+
+export function sendSkip() {
+	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_SKIP]));
+}
+
+export function sendPrevious() {
+	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PREVIOUS]));
 }
 
 export function sendHome() {
@@ -334,19 +355,41 @@ function scaleNum(num: number) {
 	return Math.round(num * 100) & 0xffff;
 }
 
-async function sendPacket(pointOffset: number, nums: number, pointNums: number[]) {
+// Standard CRC32 (IEEE 802.3 / zlib variant), mirrored byte-for-byte by the
+// firmware's own crc32Update/computeFileCrc32 in file_handler.cpp. Takes/
+// returns the raw (not yet finalized — caller XORs with 0xffffffff at the
+// end) running state so callers can fold in bytes incrementally across
+// multiple calls — see sendPatternFragments, which accumulates the checksum
+// from the exact same chunk buffers it sends, so there's no way for what's
+// checksummed to diverge from what's actually transmitted.
+function crc32Update(crc: number, bytes: Uint8Array): number {
+	for (let i = 0; i < bytes.length; i++) {
+		crc ^= bytes[i];
+		for (let j = 0; j < 8; j++) {
+			crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+		}
+	}
+	return crc;
+}
+
+async function sendPacket(pointOffset: number, dataBytes: Uint8Array) {
 	const byteOffset = pointOffset * 2;
 
-	let dataView = new DataView(new ArrayBuffer(1 + 4 + 2 * nums));
-	dataView.setUint8(0, WSCmdType_t.WSCmdType_PATTERN);
-	dataView.setUint32(1, byteOffset);
+	// Per-chunk CRC32 so the ESP can catch a corrupted/torn/misordered chunk
+	// immediately and NACK it for a retry, instead of only finding out after
+	// the whole (possibly very long) upload via the final whole-file checksum.
+	const chunkCrc = (crc32Update(0xffffffff, dataBytes) ^ 0xffffffff) >>> 0;
 
-	for (let i = 0; i < nums; i++) {
-		dataView.setUint16(5 + i * 2, scaleNum(pointNums[pointOffset + i]));
-	}
+	const message = new Uint8Array(5 + dataBytes.length + 4);
+	const header = new DataView(message.buffer);
+	header.setUint8(0, WSCmdType_t.WSCmdType_PATTERN);
+	header.setUint32(1, byteOffset);
+	message.set(dataBytes, 5);
+	header.setUint32(5 + dataBytes.length, chunkCrc);
 
-	ws.send(dataView.buffer);
-	await waitForAck();
+	ws.send(message.buffer);
+	const ok = await waitForAck();
+	if (!ok) throw new Error(`ESP failed to write chunk at byte offset ${byteOffset}`);
 }
 
 export async function sendPatternFragments(
@@ -356,6 +399,7 @@ export async function sendPatternFragments(
 	coordinatePairs: number = 1024
 ) {
 	sendingPattern.set(true);
+	uploadError.set('');
 	sentPacketCount.set(0);
 	const total = Math.ceil(pointNums.length / (coordinatePairs * 2));
 	totalPacketCount.set(total);
@@ -363,16 +407,46 @@ export async function sendPatternFragments(
 	const filePath = name.replace('.gcode', '') + '.bin';
 	const charArray = new TextEncoder().encode(filePath);
 
+	// Checksum accumulated incrementally from the exact same per-chunk byte
+	// buffers handed to sendPacket below (see crc32Update) — built once and
+	// folded in only after the ESP confirms that specific chunk, rather than
+	// computed separately up front, so there's no way for "what's checksummed"
+	// to diverge from "what's actually sent" (and retries can't double-count).
+	let crc = 0xffffffff;
+
 	let isResuming = false;
 	let pointOffset = 0;
 	let nums = coordinatePairs * 2;
 
+	// A network blip (or the ESP rejecting a resume it can't honor, e.g.
+	// after its own reboot) must not leave this loop retrying forever while
+	// the UI keeps showing a normal-looking progress bar — bound the retries
+	// and surface a real failure so the user knows to try again.
+	const MAX_CONSECUTIVE_FAILURES = 8;
+	let consecutiveFailures = 0;
+
+	function giveUp(message: string) {
+		console.error(message);
+		sendingPattern.set(false);
+		uploadError.set(message);
+	}
+
 	while (pointOffset < pointNums.length) {
 		if (!get(sendingPattern)) return;
-		while (get(socketState) !== WebSocket.OPEN) {
-			await new Promise((r) => setTimeout(r, 1000));
-		}
 
+		let socketWaited = false;
+		while (get(socketState) !== WebSocket.OPEN) {
+			socketWaited = true;
+			await new Promise((r) => setTimeout(r, 1000));
+			consecutiveFailures++;
+			if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
+				giveUp('Upload failed: lost connection to the ESP and could not reconnect.');
+				return;
+			}
+		}
+		if (socketWaited) consecutiveFailures = 0;
+
+		let needsFullRestart = false;
 		try {
 			if (pointOffset === 0 || isResuming) {
 				let dataView = new DataView(new ArrayBuffer(6));
@@ -381,29 +455,82 @@ export async function sendPatternFragments(
 				dataView.setUint32(2, pointNums.length * 2);
 				ws.send(new Uint8Array([...new Uint8Array(dataView.buffer), ...charArray, 0x00]));
 
-				await waitForAck();
+				const startOk = await waitForAck();
+				if (!startOk) {
+					// The ESP couldn't honor the resume (e.g. it rebooted and lost
+					// the in-progress .tmp) — resuming from a non-zero offset into
+					// whatever it has now would corrupt the file, so start over
+					// completely instead of retrying the same resume forever.
+					if (isResuming) needsFullRestart = true;
+					throw new Error('ESP rejected pattern transfer start');
+				}
 				isResuming = false;
 			}
 
-			let currentChunkSize = Math.min(nums, pointNums.length - pointOffset);
-			await sendPacket(pointOffset, currentChunkSize, pointNums);
+			const currentChunkSize = Math.min(nums, pointNums.length - pointOffset);
+			const chunkBytes = new Uint8Array(currentChunkSize * 2);
+			const chunkView = new DataView(chunkBytes.buffer);
+			for (let i = 0; i < currentChunkSize; i++) {
+				chunkView.setUint16(i * 2, scaleNum(pointNums[pointOffset + i]));
+			}
+
+			await sendPacket(pointOffset, chunkBytes);
+			crc = crc32Update(crc, chunkBytes);
 
 			pointOffset += currentChunkSize;
 			sentPacketCount.update((n) => n + 1);
+			consecutiveFailures = 0;
 		} catch (error) {
-			console.warn('Fragment failed, holding state to resume...', error);
-			isResuming = true;
+			consecutiveFailures++;
+			if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
+				giveUp(`Upload failed after repeated errors: ${error}`);
+				return;
+			}
+			if (needsFullRestart) {
+				console.warn('Resume rejected, restarting upload from scratch...', error);
+				pointOffset = 0;
+				crc = 0xffffffff;
+				sentPacketCount.set(0);
+				isResuming = false;
+			} else {
+				console.warn('Fragment failed, holding state to resume...', error);
+				isResuming = true;
+			}
 			await new Promise((r) => setTimeout(r, 2000));
 		}
 	}
 
+	const checksum = (crc ^ 0xffffffff) >>> 0;
+
 	let finSent = false;
+	let finFailures = 0;
 	while (!finSent) {
 		try {
-			ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PATTERN_FIN, isCleaner ? 1 : 0]));
-			await waitForAck();
+			ws.send(
+				new Uint8Array([
+					WSCmdType_t.WSCmdType_PATTERN_FIN,
+					isCleaner ? 1 : 0,
+					(checksum >>> 24) & 0xff,
+					(checksum >>> 16) & 0xff,
+					(checksum >>> 8) & 0xff,
+					checksum & 0xff
+				])
+			);
+			const ok = await waitForAck();
+			if (!ok) {
+				// Deterministic mismatch on the same data — retrying this same FIN
+				// won't help (the ESP already discarded the corrupted upload), so
+				// stop instead of retrying forever; the user can just hit Send again.
+				giveUp('Pattern upload failed checksum verification on the ESP — discarded. Please retry.');
+				return;
+			}
 			finSent = true;
 		} catch (error) {
+			finFailures++;
+			if (finFailures > MAX_CONSECUTIVE_FAILURES) {
+				giveUp(`Upload finish failed after repeated errors: ${error}`);
+				return;
+			}
 			console.warn('Finish command failed, retrying...', error);
 			await new Promise((r) => setTimeout(r, 2000));
 		}

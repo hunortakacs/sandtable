@@ -1,12 +1,6 @@
 <script lang="ts">
-	import { currentFile, machinePatterns, machineStats, playbackMode } from './stores';
-	import {
-		sendDeletePattern,
-		sendPause,
-		sendResume,
-		sendStart,
-		sendQueueInsert
-	} from './websocket';
+	import { currentFile, machinePatterns, machineStats, playbackMode, selectedPattern } from './stores';
+	import { sendDeletePattern, sendPause, sendResume, sendQueueInsert } from './websocket';
 
 	// 1. Add toggle state
 	let showCleaner = true;
@@ -17,6 +11,11 @@
 		: $machinePatterns.filter((p) => p.type !== 1);
 
 	$: disabled = $machineStats.busy || (!$machineStats.homed && $machineStats.safemode);
+
+	// If the selected pattern gets deleted out from under us, drop the selection.
+	$: if ($selectedPattern && !$machinePatterns.some((p) => p.filename === $selectedPattern)) {
+		selectedPattern.set('');
+	}
 </script>
 
 {#if $machinePatterns.length > 0}
@@ -35,7 +34,11 @@
 
 		<div class="flex flex-col gap-2 max-h-96 overflow-y-auto pr-1">
 			{#each filteredPatterns as pattern}
-				<div class="flex gap-2 items-center bg-base-100 p-2 rounded-lg">
+				<div
+					class="flex gap-2 items-center bg-base-100 p-2 rounded-lg"
+					class:ring-2={pattern.filename === $selectedPattern}
+					class:ring-primary={pattern.filename === $selectedPattern}
+				>
 					{#if pattern.filename == $currentFile && $playbackMode === 0}
 						<button
 							class="btn btn-sm btn-square btn-primary"
@@ -47,11 +50,15 @@
 					{:else}
 						<button
 							class="btn btn-sm btn-square btn-ghost"
-							aria-label="start"
-							onclick={() => sendStart(pattern.filename)}
-							{disabled}
+							aria-label="select"
+							title="Select for manual play"
+							onclick={() => selectedPattern.set(pattern.filename)}
 						>
-							<i class="fa-solid fa-play"></i>
+							<i
+								class="fa-solid {pattern.filename === $selectedPattern
+									? 'fa-circle-check'
+									: 'fa-regular fa-circle'}"
+							></i>
 						</button>
 					{/if}
 

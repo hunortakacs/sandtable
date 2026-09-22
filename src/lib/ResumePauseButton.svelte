@@ -1,18 +1,23 @@
 <script lang="ts">
-	import { currentFile, machineStats } from './stores';
-	import { sendPause, sendResume } from './websocket';
+	import { currentFile, machineStats, selectedPattern, armedPlaybackMode } from './stores';
+	import { sendPause, sendResume, sendStart, sendPlayQueue, sendPlayShuffle } from './websocket';
 
 	function resumePauseToggleButton() {
 		if ($machineStats.executing) sendPause();
-		else sendResume();
+		else if ($currentFile !== '') sendResume();
+		else if ($selectedPattern !== '') sendStart($selectedPattern);
+		// Nothing loaded and no library pattern picked — start whichever
+		// operating mode (Queue/Shuffle) is currently armed.
+		else if ($armedPlaybackMode === 2) sendPlayShuffle();
+		else sendPlayQueue();
 	}
 </script>
 
 <button
 	class="btn btn-square"
-	aria-label={$machineStats.executing ? 'Pause' : 'Resume'}
+	aria-label={$machineStats.executing ? 'Pause' : 'Play'}
 	onclick={resumePauseToggleButton}
-	disabled={$machineStats.homing || (!$machineStats.executing && $currentFile == '')}
+	disabled={$machineStats.homing}
 >
 	<i class="fa-solid {$machineStats.executing ? 'fa-pause' : 'fa-play'}"></i>
 </button>

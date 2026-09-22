@@ -19,7 +19,9 @@
 	let lines: string[] = [];
 
 	let canvas: HTMLCanvasElement;
+	let bgCanvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null;
+	let bgCtx: CanvasRenderingContext2D | null;
 	let drawing = false;
 	let preview = false;
 
@@ -30,6 +32,44 @@
 		pointNums = [];
 		lines = [];
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		bgCtx?.clearRect(0, 0, canvas.width, canvas.height);
+	}
+
+	// Loads the pattern the ESP reports as currently playing: the whole shape
+	// is redrawn fresh on the faint background layer (a pure function of
+	// pointNums, so it's safe to call again for the same pattern — e.g. on
+	// every reconnect — unlike compositing/fading previous frames), and the
+	// portion already traversed (per `progress`, a byte offset from the
+	// firmware, 4 bytes/coordinate) is instantly filled in on the foreground
+	// layer in the darker "already drawn" color. This is what makes progress
+	// survive a page reload instead of starting the preview from scratch.
+	export function loadDevicePattern(newLines: string[], progress: number) {
+		lines = newLines;
+		pointNums = parseGcode(lines);
+		if (!ctx || !bgCtx || !canvas) return;
+
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		bgCtx.clearRect(0, 0, canvas.width, canvas.height);
+		for (let i = 0; i < pointNums.length - 2; i += 2) {
+			draw(pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3], orange[300], orange[200], bgCtx);
+		}
+
+		if (progress > 0) {
+			drawUpTo(Math.floor(progress / 4) * 2);
+		}
+	}
+
+	// Instantly (no animation) strokes pointNums[0..index] on the foreground
+	// layer in the darker "already traversed" color — used both to fast-
+	// forward a freshly (re)loaded pattern to wherever the machine has
+	// actually already gotten to (e.g. after a page refresh), matching the
+	// color live position ticks use for the same purpose.
+	export function drawUpTo(index: number) {
+		if (!ctx || pointNums.length < 4 || index <= 0) return;
+		const end = Math.min(index, pointNums.length - 2);
+		for (let i = 0; i < end; i += 2) {
+			draw(pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3], orange[400], orange[300]);
+		}
 	}
 
 	export function setCenteredBounds(centered: boolean) {
@@ -60,15 +100,15 @@
 		preview = false;
 	}
 
-	export function processLines(newLines: string[]) {
+	export function processLines(newLines: string[], skipAutoPreview = false) {
 		lines = newLines;
-		recalculate();
+		recalculate(skipAutoPreview);
 	}
 
-	export function recalculate() {
+	export function recalculate(skipAutoPreview = false) {
 		if (lines.length === 0) return;
 		pointNums = parseGcode(lines);
-		triggerPreview();
+		if (!skipAutoPreview) triggerPreview();
 	}
 
 	function draw(
@@ -77,9 +117,11 @@
 		x2: number,
 		y2: number,
 		stroke: string = orange[300],
-		fill: string = orange[200]
+		fill: string = orange[200],
+		targetCtx: CanvasRenderingContext2D | null = ctx
 	) {
-		if (!ctx) return;
+		if (!targetCtx) return;
+		const ctx = targetCtx;
 
 		ctx.beginPath();
 		ctx.moveTo(x1, y1);
@@ -206,6 +248,13 @@
 			ctx.translate(0, canvas.height);
 			ctx.scale(1, -1);
 		}
+		bgCtx = bgCanvas.getContext('2d');
+		if (bgCtx) {
+			bgCtx.lineJoin = 'round';
+			bgCtx.lineCap = 'round';
+			bgCtx.translate(0, bgCanvas.height);
+			bgCtx.scale(1, -1);
+		}
 	});
 
 	position.subscribe(($position) => {
@@ -233,6 +282,13 @@
 
 <div class="flex flex-col items-center relative rounded-box overflow-hidden border border-base-300">
 	<canvas
+		bind:this={bgCanvas}
+		{width}
+		{height}
+		class="touch-none bg-orange-100 max-w-[490px] w-full absolute inset-0"
+	>
+	</canvas>
+	<canvas
 		bind:this={canvas}
 		onmousedown={startManualDraw}
 		onmousemove={(e) => manualDraw(...getCanvasCoords(e))}
@@ -242,7 +298,7 @@
 		ontouchend={stopManualDraw}
 		{width}
 		{height}
-		class="touch-none bg-orange-100 max-w-[490px] w-full {preview ? 'pointer-events-none' : ''}"
+		class="touch-none max-w-[490px] w-full relative {preview ? 'pointer-events-none' : ''}"
 	>
 	</canvas>
 </div>
