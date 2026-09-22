@@ -1,5 +1,13 @@
 <script lang="ts">
-	import { queue, queueIndex, playbackMode, autoclean, machineStats } from './stores';
+	import {
+		queue,
+		queueIndex,
+		playbackMode,
+		autoclean,
+		machineStats,
+		machinePatterns,
+		currentFile
+	} from './stores';
 	import {
 		sendQueueMove,
 		sendQueueRemove,
@@ -10,6 +18,14 @@
 	} from './websocket';
 
 	$: disabled = $machineStats.busy || (!$machineStats.homed && $machineStats.safemode);
+
+	// The firmware plays cleaner patterns in between queue entries without adding
+	// them to the queue itself, so we detect this by checking whether the file
+	// currently playing on the machine is a cleaner-type pattern.
+	$: cleanerPlaying =
+		$playbackMode === 1 &&
+		$currentFile !== '' &&
+		$machinePatterns.find((p) => p.filename === $currentFile)?.type === 1;
 </script>
 
 <div class="flex flex-col p-4 gap-4 rounded-box bg-base-200 h-fit w-full max-w-md">
@@ -54,7 +70,9 @@
 		{:else}
 			{#each $queue as qItem, i}
 				<div
-					class="flex gap-2 items-center p-2 rounded-lg {i === $queueIndex && $playbackMode === 1
+					class="flex gap-2 items-center p-2 rounded-lg {i === $queueIndex &&
+					$playbackMode === 1 &&
+					!cleanerPlaying
 						? 'bg-primary text-primary-content'
 						: 'bg-base-100'}"
 				>
@@ -84,6 +102,23 @@
 						</button>
 					</div>
 				</div>
+
+				{#if cleanerPlaying && i === $queueIndex}
+					<div
+						class="flex gap-2 items-center p-2 rounded-lg border-2 border-dashed border-accent bg-accent/10"
+					>
+						<span class="font-mono text-xs w-5 text-center opacity-70">
+							<i class="fa-solid fa-broom"></i>
+						</span>
+						<div class="flex flex-col flex-1 min-w-0">
+							<p class="font-bold italic truncate text-sm">
+								{$currentFile.replace('/', '').replace('.bin', '')}
+							</p>
+							<span class="badge badge-xs badge-accent mt-1 w-fit">Cleaner</span>
+						</div>
+						<i class="fa-solid fa-spinner fa-spin text-accent"></i>
+					</div>
+				{/if}
 			{/each}
 		{/if}
 	</div>
