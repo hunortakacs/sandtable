@@ -111,9 +111,12 @@ function handleBinaryMessage(data: any) {
 			const statusBools = dataView.getUint8(1);
 			const configBools = dataView.getUint8(2);
 
-			autoclean.set(Boolean(configBools & 0x04));
-			logEnabled.set(Boolean(configBools & 0x02));
-			playbackMode.set(configBools & 0x01);
+			// bit layout matches firmware's websocket_handler.cpp sendStats: playbackMode
+			// needs 2 bits (IDLE=0, QUEUE=1, SHUFFLE=2), so autoclean/logEnabled moved up
+			// to bits 3/2 to make room.
+			autoclean.set(Boolean(configBools & 0x08));
+			logEnabled.set(Boolean(configBools & 0x04));
+			playbackMode.set(configBools & 0x03);
 
 			prevPosition.set(get(position));
 			position.set({

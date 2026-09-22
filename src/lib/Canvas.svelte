@@ -6,7 +6,7 @@
 
 	export let width = 490;
 	export let height = 490;
-	export let line = 10;
+	export let line = 8;
 
 	export let pointNums: number[] = [];
 
