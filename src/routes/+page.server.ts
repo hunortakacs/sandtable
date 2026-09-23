@@ -4,7 +4,7 @@ import { error, redirect } from '@sveltejs/kit';
 
 // Which relay to talk to. Configurable so moving the relay (or failing back to
 // the old one) is an environment change rather than a code change and redeploy.
-const DEFAULT_RELAY_URL = 'wss://relay.tahun.dev';
+const DEFAULT_RELAY_URL = 'wss://sandtable-relay.tahun.dev';
 
 export const load = (async ({ cookies }) => {
 	// Read at request time, not build time: on Cloudflare these come from the
