@@ -19,7 +19,7 @@
 	// config declares — a dashboard-only value would be wiped on the next push.
 	// Secrets are managed separately and are NOT affected by this.
 	"vars": {
-		"RELAY_URL": "wss://sandtable.tahun.dev"
+		"RELAY_URL": "wss://relay.tahun.dev"
 	}
 	// WEBSOCKET_PASSWORD is deliberately absent: it is a secret, set via the
 	// dashboard or `wrangler secret put WEBSOCKET_PASSWORD`, so it never lands
