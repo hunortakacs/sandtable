@@ -158,7 +158,7 @@
 		<div class="flex gap-2 w-full">
 			<button
 				class="btn flex-1"
-				onclick={() => canvasComponent?.triggerPreview(1)}
+				onclick={() => canvasComponent?.triggerPreview(true)}
 				aria-label="preview"
 				disabled={pointNums.length === 0}
 			>

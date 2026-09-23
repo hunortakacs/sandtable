@@ -107,29 +107,105 @@
 		if (!skipAutoPreview) triggerPreview();
 	}
 
-	async function preciseMessageDelay(iterations: number) {
-		for (let i = 0; i < iterations; i++) {
-			await new Promise((resolve) => {
-				const mc = new MessageChannel();
-				mc.port1.onmessage = resolve;
-				mc.port2.postMessage(null);
-			});
-		}
-	}
+	const nextFrame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
+
+	// Cancels a preview that is still running when a newer one starts. Clearing
+	// `preview` alone wasn't enough: the new run sets it straight back to true,
+	// so both loops kept drawing to the same canvas.
+	let previewRun = 0;
+
+	// Canvas units per second the animated preview traces at.
+	//
+	// The previous version waited a fixed time per *segment*, which made the
+	// apparent pen speed a function of how finely a pattern happened to be
+	// sampled rather than of its geometry. Across the bundled patterns the mean
+	// segment length ranges from 0.45 to 244.95 units — a 545x spread — so the
+	// same animation crawled through a densely sampled pattern and shot through
+	// a coarse one, and neither resembled how the machine actually draws it.
+	//
+	// Pacing by distance instead makes every pattern trace at the same speed,
+	// with the duration honestly proportional to how much line it contains. At
+	// this rate the bundled set spans roughly 1s (shortest) to 60s (the 306k-unit
+	// eraser spiral), with the median around 11s. Still far faster than the
+	// machine's ~27 units/s, which is the point of a preview.
+	const PREVIEW_SPEED = 5000;
 
 	// Editor-only animation: traces the loaded shape in the traversed style so
 	// you can see the drawing order. Unrelated to what the machine is doing.
-	export async function triggerPreview(delay = 0) {
+	export async function triggerPreview(animated = false) {
 		if (!ctx || pointNums.length < 4) return;
 		livePath = false;
 		trailIndex = -1;
 		ctx.clearRect(0, 0, width, height);
-		preview = true;
-		for (let i = 0; i < coordinateCount(pointNums) - 1; i++) {
-			drawSegment(ctx, i, TRAVERSED);
-			if (delay > 0) await preciseMessageDelay(delay);
-			if (!preview) return;
+
+		const segments = coordinateCount(pointNums) - 1;
+
+		if (!animated) {
+			for (let i = 0; i < segments; i++) drawSegment(ctx, i, TRAVERSED);
+			preview = false;
+			return;
 		}
+
+		preview = true;
+		const run = ++previewRun;
+
+		let index = 0; // segment currently being traced
+		let covered = 0; // distance already drawn within that segment
+		let last = await nextFrame();
+
+		while (index < segments) {
+			const now = await nextFrame();
+			if (!preview || run !== previewRun || !ctx) return;
+
+			// Distance this frame is allowed to advance. Driven by elapsed time,
+			// so the trace holds its speed regardless of frame rate or of how
+			// many segments happen to fall inside one frame.
+			let budget = ((now - last) / 1000) * PREVIEW_SPEED;
+			last = now;
+
+			while (budget > 0 && index < segments) {
+				const i = index * 2;
+				const x1 = pointNums[i];
+				const y1 = pointNums[i + 1];
+				const x2 = pointNums[i + 2];
+				const y2 = pointNums[i + 3];
+				const length = Math.hypot(x2 - x1, y2 - y1);
+
+				// Repeated points carry no distance; stepping over them without
+				// consuming budget keeps them from stalling the trace.
+				if (length === 0) {
+					index++;
+					covered = 0;
+					continue;
+				}
+
+				const from = covered / length;
+				const remaining = length - covered;
+
+				if (budget >= remaining) {
+					stroke(ctx, x1 + (x2 - x1) * from, y1 + (y2 - y1) * from, x2, y2, TRAVERSED);
+					budget -= remaining;
+					index++;
+					covered = 0;
+				} else {
+					// Long segments are drawn a piece at a time rather than
+					// appearing whole, which is what keeps the speed uniform
+					// even when one segment spans the table.
+					covered += budget;
+					const to = covered / length;
+					stroke(
+						ctx,
+						x1 + (x2 - x1) * from,
+						y1 + (y2 - y1) * from,
+						x1 + (x2 - x1) * to,
+						y1 + (y2 - y1) * to,
+						TRAVERSED
+					);
+					budget = 0;
+				}
+			}
+		}
+
 		preview = false;
 	}
 
