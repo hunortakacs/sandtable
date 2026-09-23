@@ -1,25 +1,42 @@
 <script lang="ts">
-	import { led } from './stores';
+	import { espConnected, led } from './stores';
 	import { sendLedValue } from './websocket';
+	import { createEchoGate, createThrottledSender } from './liveControl';
 
-
+	const sender = createThrottledSender(sendLedValue);
+	const echo = createEchoGate();
 
 	let sliding = false;
-	$: localValue = 0;
-	$: if(!sliding) {
+	let localValue = 0;
+
+	// Follow the machine only while it isn't us driving it — see createEchoGate.
+	$: if (!sliding && echo.accepts($led)) {
 		localValue = $led;
 	}
 	$: ledPercentage = Math.round((localValue * 100) / 255);
 	$: numberInput = ledPercentage;
 
+	function emit(value: number, final: boolean) {
+		echo.sent(value);
+		if (final) sender.commit(value);
+		else sender.push(value);
+	}
+
 	function convertAndSend() {
 		if (numberInput > 100) return;
-		sendLedValue(Math.floor((numberInput * 255) / 100));
+		const value = Math.floor((numberInput * 255) / 100);
+		localValue = value;
+		emit(value, true);
 	}
 
 	function slideInput() {
 		sliding = true;
-		sendLedValue(localValue);
+		emit(localValue, false);
+	}
+
+	function slideEnd() {
+		sliding = false;
+		emit(localValue, true);
 	}
 
 	let glow: HTMLDivElement;
@@ -43,7 +60,8 @@
 		bind:value={localValue}
 		class="range range-sm"
 		oninput={slideInput}
-		onchange={() => (sliding = false)}
+		onchange={slideEnd}
+		disabled={!$espConnected}
 	/>
 	<div class="w-10 aspect-square flex justify-center items-center relative">
 		<div class="absolute top-[9px] rounded-full" bind:this={glow}></div>
@@ -56,6 +74,7 @@
 			max="100"
 			class="badge min-w-14 text-center"
 			bind:value={numberInput}
+			disabled={!$espConnected}
 		/>
 	</form>
 </div>

@@ -1,23 +1,42 @@
 <script lang="ts">
-	import { fan } from './stores';
+	import { espConnected, fan } from './stores';
 	import { sendFanValue } from './websocket';
+	import { createEchoGate, createThrottledSender } from './liveControl';
+
+	const sender = createThrottledSender(sendFanValue);
+	const echo = createEchoGate();
 
 	let sliding = false;
-	$: localValue = 0;
-	$: if(!sliding) {
+	let localValue = 0;
+
+	// Follow the machine only while it isn't us driving it — see createEchoGate.
+	$: if (!sliding && echo.accepts($fan)) {
 		localValue = $fan;
 	}
 	$: fanPercentage = Math.round((localValue * 100) / 255);
 	$: numberInput = fanPercentage;
 
+	function emit(value: number, final: boolean) {
+		echo.sent(value);
+		if (final) sender.commit(value);
+		else sender.push(value);
+	}
+
 	function convertAndSend() {
 		if (numberInput > 100) return;
-		sendFanValue(Math.floor((numberInput * 255) / 100));
+		const value = Math.floor((numberInput * 255) / 100);
+		localValue = value;
+		emit(value, true);
 	}
 
 	function slideInput() {
 		sliding = true;
-		sendFanValue(localValue);
+		emit(localValue, false);
+	}
+
+	function slideEnd() {
+		sliding = false;
+		emit(localValue, true);
 	}
 
 	let fanIcon: HTMLElement;
@@ -42,7 +61,8 @@
 		bind:value={localValue}
 		class="range range-sm"
 		oninput={slideInput}
-		onchange={() => (sliding = false)}
+		onchange={slideEnd}
+		disabled={!$espConnected}
 	/>
 	<div class="w-10 aspect-square flex justify-center items-center">
 		<i id="fanIcon" class="fa-solid fa-fan text-center text-2xl" bind:this={fanIcon}></i>
@@ -54,6 +74,7 @@
 			max="100"
 			class="badge min-w-14 text-center"
 			bind:value={numberInput}
+			disabled={!$espConnected}
 		/>
 	</form>
 </div>

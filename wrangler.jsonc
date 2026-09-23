@@ -1,0 +1,25 @@
+{
+	"name": "sandtable",
+	"main": ".svelte-kit/cloudflare/_worker.js",
+	// Keep in step with the workerd version pulled in by @sveltejs/adapter-cloudflare.
+	"compatibility_date": "2025-09-21",
+	// SvelteKit's server runtime uses Node APIs that Workers provides behind this flag.
+	"compatibility_flags": ["nodejs_compat"],
+	"assets": {
+		"binding": "ASSETS",
+		"directory": ".svelte-kit/cloudflare"
+	},
+	"observability": {
+		"enabled": true
+	},
+	// Plain (non-secret) config. It lives here rather than only in the dashboard
+	// because a deploy replaces the worker's whole `vars` set with what the
+	// config declares — a dashboard-only value would be wiped on the next push.
+	// Secrets are managed separately and are NOT affected by this.
+	"vars": {
+		"RELAY_URL": "wss://sandtable.tahun.dev"
+	}
+	// WEBSOCKET_PASSWORD is deliberately absent: it is a secret, set via the
+	// dashboard or `wrangler secret put WEBSOCKET_PASSWORD`, so it never lands
+	// in the repo. Both are read at request time via $env/dynamic/private.
+}

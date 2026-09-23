@@ -1,5 +1,5 @@
 <script>
-	import { logEnabled } from './stores';
+	import { espConnected, logEnabled } from './stores';
 	import { sendLogLevel } from './websocket';
 
 	function toggleLogLevel() {
@@ -8,6 +8,11 @@
 	}
 </script>
 
-<button class="btn btn-square" aria-label="log-level" onclick={toggleLogLevel}>
+<button
+	class="btn btn-square"
+	aria-label="log-level"
+	onclick={toggleLogLevel}
+	disabled={!$espConnected}
+>
 	<i class="fa-solid {$logEnabled ? 'fa-comment' : 'fa-comment-slash'}"></i>
 </button>

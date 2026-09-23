@@ -26,13 +26,17 @@ const defaultMachineStats: MachineStats = {
 	safemode: true
 };
 
-export const prevPosition = writable<Position>({ x: 0, y: 0 });
 export const position = writable<Position>({ x: 0, y: 0 });
 export const feedrate = writable<number>(2000);
 export const led = writable<number>(0);
 export const fan = writable<number>(0);
 export const socketState = writable<number>(3);
 export const espConnected = writable<boolean>(false);
+// Timestamp (ms) of the last byte received from the relay. The relay states the
+// ESP's status unprompted every 5s, so silence here is itself the signal that
+// this connection is dead — without waiting for the browser's own, far slower,
+// TCP-level notice. See the liveness watchdog in websocket.ts.
+export const lastRelayMessage = writable<number>(0);
 export const machineStats = writable<MachineStats>(defaultMachineStats);
 export const sendingPattern = writable<boolean>(false);
 // Set when a pattern upload gives up after repeated failures, so the UI can
@@ -40,9 +44,12 @@ export const sendingPattern = writable<boolean>(false);
 // to false) with no explanation. Cleared at the start of the next attempt.
 export const uploadError = writable<string>('');
 export const currentFile = writable<string>('');
-// Byte offset of the next coordinate to be read within currentFile (4
-// bytes/coordinate), or -1 if nothing is currently playing/paused.
-export const patternProgress = writable<number>(-1);
+// Index of the last coordinate of currentFile the machine has actually arrived
+// at — the one it has already left behind, never the one it is travelling
+// toward. -1 when nothing has been reached yet. Reported by the firmware
+// alongside every position update, so the drawn trail and the live dot can
+// never disagree. See MachineControl::getLastReachedIndex.
+export const patternIndex = writable<number>(-1);
 export const logEnabled = writable<boolean>(true);
 
 export const totalPacketCount = writable<number>(0);

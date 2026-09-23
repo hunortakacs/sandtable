@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { currentFile, machineStats } from './stores';
+	import { currentFile, espConnected, machineStats } from './stores';
 	import { sendPrevious } from './websocket';
 </script>
 
@@ -8,7 +8,7 @@
 	aria-label="Previous"
 	title="Previous"
 	onclick={sendPrevious}
-	disabled={$machineStats.homing || $currentFile === ''}
+	disabled={!$espConnected || $machineStats.homing || $currentFile === ''}
 >
 	<i class="fa-solid fa-backward-step"></i>
 </button>

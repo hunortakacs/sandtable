@@ -1,0 +1,10 @@
+# pnpm 10+ reads build-script approval from here rather than package.json.
+# Both esbuild and workerd ship postinstall steps that fetch/link their native
+# binaries; without approval the install "succeeds" but leaves them unusable.
+#
+# NOTE: pnpm generates this file with literal "set this to true or false"
+# placeholders when it needs approval. Leaving those in is what broke the
+# previous deploy — the values must be real booleans.
+allowBuilds:
+  esbuild: true
+  workerd: true

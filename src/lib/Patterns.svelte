@@ -1,5 +1,12 @@
 <script lang="ts">
-	import { currentFile, machinePatterns, machineStats, playbackMode, selectedPattern } from './stores';
+	import {
+		currentFile,
+		espConnected,
+		machinePatterns,
+		machineStats,
+		playbackMode,
+		selectedPattern
+	} from './stores';
 	import { sendDeletePattern, sendPause, sendResume, sendQueueInsert } from './websocket';
 
 	// 1. Add toggle state
@@ -10,7 +17,8 @@
 		? $machinePatterns
 		: $machinePatterns.filter((p) => p.type !== 1);
 
-	$: disabled = $machineStats.busy || (!$machineStats.homed && $machineStats.safemode);
+	$: disabled =
+		!$espConnected || $machineStats.busy || (!$machineStats.homed && $machineStats.safemode);
 
 	// If the selected pattern gets deleted out from under us, drop the selection.
 	$: if ($selectedPattern && !$machinePatterns.some((p) => p.filename === $selectedPattern)) {

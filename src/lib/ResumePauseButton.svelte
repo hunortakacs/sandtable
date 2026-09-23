@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { currentFile, machineStats, selectedPattern, armedPlaybackMode } from './stores';
+	import { currentFile, espConnected, machineStats, selectedPattern, armedPlaybackMode } from './stores';
 	import { sendPause, sendResume, sendStart, sendPlayQueue, sendPlayShuffle } from './websocket';
 
 	function resumePauseToggleButton() {
@@ -17,7 +17,7 @@
 	class="btn btn-square"
 	aria-label={$machineStats.executing ? 'Pause' : 'Play'}
 	onclick={resumePauseToggleButton}
-	disabled={$machineStats.homing}
+	disabled={!$espConnected || $machineStats.homing}
 >
 	<i class="fa-solid {$machineStats.executing ? 'fa-pause' : 'fa-play'}"></i>
 </button>

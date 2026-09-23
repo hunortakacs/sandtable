@@ -7,7 +7,8 @@
 		autoclean,
 		machineStats,
 		machinePatterns,
-		currentFile
+		currentFile,
+		espConnected
 	} from './stores';
 	import { sendQueueMove, sendQueueRemove, sendQueueClear, sendAutoclean } from './websocket';
 
@@ -66,9 +67,14 @@
 				class="toggle toggle-primary toggle-sm"
 				checked={$autoclean}
 				onchange={(e) => sendAutoclean(e.currentTarget.checked)}
+				disabled={!$espConnected}
 			/>
 		</label>
-		<button class="btn btn-sm btn-error btn-outline" onclick={() => sendQueueClear()}>
+		<button
+			class="btn btn-sm btn-error btn-outline"
+			onclick={() => sendQueueClear()}
+			disabled={!$espConnected}
+		>
 			Clear All
 		</button>
 	</div>
@@ -114,21 +120,21 @@
 						<button
 							class="btn btn-xs btn-square btn-ghost"
 							onclick={() => sendQueueMove(i, i - 1)}
-							disabled={i === 0}
+							disabled={!$espConnected || i === 0}
 						>
 							<i class="fa-solid fa-arrow-up"></i>
 						</button>
 						<button
 							class="btn btn-xs btn-square btn-ghost"
 							onclick={() => sendQueueMove(i, i + 1)}
-							disabled={i === $queue.length - 1}
+							disabled={!$espConnected || i === $queue.length - 1}
 						>
 							<i class="fa-solid fa-arrow-down"></i>
 						</button>
 						<button
 							class="btn btn-xs btn-square btn-ghost hover:bg-error hover:text-error-content"
 							onclick={() => sendQueueRemove(i)}
-							disabled={i === $queueIndex && $playbackMode === 1}
+							disabled={!$espConnected || (i === $queueIndex && $playbackMode === 1)}
 						>
 							<i class="fa-solid fa-xmark"></i>
 						</button>

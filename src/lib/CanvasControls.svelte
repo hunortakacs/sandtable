@@ -5,7 +5,7 @@
 		sentPacketCount,
 		totalPacketCount,
 		currentFile,
-		patternProgress
+		espConnected
 	} from './stores';
 	import { sendCancelUpload, sendPatternFragments, requestPatternData } from './websocket';
 
@@ -18,7 +18,13 @@
 	let useCenteredBounds = true;
 	let patternSelector: HTMLSelectElement;
 
+	// Which pattern's coordinates the canvas is currently showing, so the same
+	// file being re-announced (reconnect, a fresh CURRENT_FILE request) doesn't
+	// pull the whole thing down the wire again and reset the preview.
+	let loadedFile = '';
+
 	function reset() {
+		loadedFile = '';
 		if (canvasComponent) canvasComponent.clear();
 		patternSelector.selectedIndex = 0;
 		patternName = 'pattern';
@@ -28,6 +34,9 @@
 		let selected = patternSelector.value;
 		if (!selected) return;
 
+		// The canvas is the editor's now; forget which device pattern was on it
+		// so the live preview comes back the next time one is announced.
+		loadedFile = '';
 		patternName = selected.replace('.gcode', '');
 
 		try {
@@ -47,6 +56,8 @@
 	// re-fetch by filename. Decodes the same 4-bytes-per-coordinate,
 	// x100-scaled format the firmware reads from and the upload path writes
 	// (see websocket.ts's sendPacket / file_handler.cpp's getNextCoordinate).
+	// How far into it the machine has got is not fetched here — the canvas
+	// tracks the firmware-reported coordinate index on its own.
 	async function loadFromDevice(filename: string) {
 		try {
 			const raw = await requestPatternData(filename);
@@ -58,8 +69,10 @@
 			const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
 			const nums: number[] = new Array(numPoints);
 			for (let i = 0; i < numPoints; i++) nums[i] = view.getUint16(i * 2) / 100;
-			if (canvasComponent) canvasComponent.loadDeviceCoordinates(nums, $patternProgress);
+			if (canvasComponent) canvasComponent.loadDeviceCoordinates(nums);
+			loadedFile = filename;
 		} catch (error) {
+			loadedFile = '';
 			console.error("Couldn't fetch the currently-playing pattern from the device.", error);
 		}
 	}
@@ -68,6 +81,7 @@
 		const selectedFile = event.target.files[0];
 		if (!selectedFile) return;
 
+		loadedFile = '';
 		patternName = selectedFile.name.replace('.gcode', '');
 
 		const reader = new FileReader();
@@ -89,10 +103,18 @@
 
 	currentFile.subscribe(($currentFile) => {
 		if (!$currentFile) {
+			loadedFile = '';
 			if (canvasComponent) canvasComponent.clear();
 			return;
 		}
+		if ($currentFile === loadedFile) return;
+
 		patternName = $currentFile.replace('/', '').replace('.bin', '');
+		// Drop the outgoing pattern's geometry up front: the machine is already
+		// reporting coordinate indices for the *new* one, and applying those to
+		// the old shape would paint a trail along the wrong path until the
+		// download lands.
+		if (canvasComponent) canvasComponent.clear();
 		loadFromDevice($currentFile);
 	});
 </script>
@@ -182,7 +204,7 @@
 				<button
 					class="btn btn-primary flex-1"
 					onclick={() => sendPatternFragments(pointNums, patternName, isCleaner)}
-					disabled={!patternName || pointNums.length === 0}
+					disabled={!$espConnected || !patternName || pointNums.length === 0}
 				>
 					<i class="fa-solid fa-paper-plane"></i> Send
 				</button>

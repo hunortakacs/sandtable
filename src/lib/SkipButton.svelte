@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { currentFile, machinePatterns, machineStats, playbackMode } from './stores';
+	import { currentFile, espConnected, machinePatterns, machineStats, playbackMode } from './stores';
 	import { sendSkip } from './websocket';
 
 	// Same derivation Queue.svelte uses to detect a cleaner currently playing,
@@ -16,7 +16,7 @@
 	aria-label={cleanerPlaying ? 'Skip Cleaner' : 'Skip Pattern'}
 	title={cleanerPlaying ? 'Skip Cleaner' : 'Skip Pattern'}
 	onclick={sendSkip}
-	disabled={$machineStats.homing || $currentFile === ''}
+	disabled={!$espConnected || $machineStats.homing || $currentFile === ''}
 >
 	<i class="fa-solid fa-forward-step"></i>
 </button>

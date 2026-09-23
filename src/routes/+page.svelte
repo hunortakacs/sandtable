@@ -24,7 +24,7 @@
 	let pointNums: number[] = [];
 
 	onMount(() => {
-		openSocket(data.websocket_password);
+		openSocket(data.websocket_password, data.relay_url);
 	});
 	onDestroy(() => {
 		closeSocket();

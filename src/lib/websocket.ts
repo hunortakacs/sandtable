@@ -7,12 +7,12 @@ import {
 	sendingPattern,
 	uploadError,
 	currentFile,
-	patternProgress,
+	patternIndex,
 	position,
 	feedrate,
 	led,
 	fan,
-	prevPosition,
+	lastRelayMessage,
 	sentPacketCount,
 	totalPacketCount,
 	playbackMode,
@@ -70,6 +70,23 @@ export enum WSCmdType_t {
 
 export let ws: WebSocket;
 
+export function isSocketOpen() {
+	return !!ws && ws.readyState === WebSocket.OPEN;
+}
+
+// Commands are fire-and-forget, and the socket can be down at any moment (that
+// is the normal state of this system between reconnects). Dropping a command
+// with a warning keeps a button press from throwing out of its click handler
+// and leaving the UI in a half-updated state.
+function send(payload: ArrayBufferLike | ArrayBufferView) {
+	if (!isSocketOpen()) {
+		console.warn('Not connected — dropping command');
+		return false;
+	}
+	ws.send(payload as ArrayBuffer);
+	return true;
+}
+
 let ackResolve: ((ok: boolean) => void) | null = null;
 
 // Only the most recently requested pattern's data is ever wanted — e.g.
@@ -120,7 +137,11 @@ export async function requestPatternData(filename: string, timeoutMs = 20000): P
 		};
 
 		const charArray = new TextEncoder().encode(filename);
-		ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PATTERN_DATA, ...charArray, 0x00]));
+		if (!send(new Uint8Array([WSCmdType_t.WSCmdType_PATTERN_DATA, ...charArray, 0x00]))) {
+			// Fail now rather than sitting on a promise nobody can ever resolve.
+			currentPatternDataRequest?.reject(new Error('Not connected'));
+			currentPatternDataRequest = null;
+		}
 	});
 }
 
@@ -146,7 +167,6 @@ export async function waitForAck(timeoutMs = 10000): Promise<boolean> {
 	});
 }
 
-
 function handleBinaryMessage(data: any) {
 	const dataView = new DataView(data);
 	if (dataView.byteLength == 0) return;
@@ -163,11 +183,14 @@ function handleBinaryMessage(data: any) {
 			break;
 		}
 		case WSCmdType_t.WSCmdType_POSITION:
-			prevPosition.set(get(position));
+			// [cmd][x u16][y u16][last reached coordinate index i32]. Position
+			// and index travel together so the canvas can never draw a trail
+			// that disagrees with where it puts the dot.
 			position.set({
 				x: dataView.getUint16(1) / 100.0,
 				y: dataView.getUint16(3) / 100.0
 			});
+			if (dataView.byteLength >= 9) patternIndex.set(dataView.getInt32(5));
 			break;
 		case WSCmdType_t.WSCmdType_STAT:
 			console.log('Stats received');
@@ -181,7 +204,6 @@ function handleBinaryMessage(data: any) {
 			logEnabled.set(Boolean(configBools & 0x04));
 			playbackMode.set(configBools & 0x03);
 
-			prevPosition.set(get(position));
 			position.set({
 				x: dataView.getUint16(3) / 100.0,
 				y: dataView.getUint16(5) / 100.0
@@ -236,11 +258,14 @@ function handleBinaryMessage(data: any) {
 			break;
 		case WSCmdType_t.WSCmdType_CURRENT_FILE: {
 			console.log('Current file received');
-			const offset = dataView.getUint32(1);
+			// [cmd][last reached coordinate index i32][filename\0]. The index is
+			// set before the filename so anything reacting to a new file already
+			// sees the progress that belongs to it — this is what lets a page
+			// that loads mid-pattern redraw the traversed part straight away.
+			patternIndex.set(dataView.getInt32(1));
 			charArray = new Uint8Array(dataView.buffer);
 			decoder = new TextDecoder('utf-8');
 			currentFile.set(decoder.decode(charArray.slice(5, charArray.length - 1)));
-			patternProgress.set(offset === 0xffffffff ? -1 : offset);
 			break;
 		}
 		case WSCmdType_t.WSCmdType_PATTERN_DATA: {
@@ -256,47 +281,151 @@ function handleBinaryMessage(data: any) {
 			}
 			break;
 		}
-		case WSCmdType_t.WSCmdType_ESP_STATE:
-			espConnected.set(dataView.getUint8(1) > 0);
-			if (get(espConnected) == true) {
+		case WSCmdType_t.WSCmdType_ESP_STATE: {
+			// The relay restates this every few seconds, so it is both an edge
+			// ("the ESP just appeared/vanished") and a liveness beat. Only the
+			// rising edge triggers a refetch — re-requesting the file index and
+			// queue on every beat would have the ESP hitting flash every 5s.
+			const connected = dataView.getUint8(1) > 0;
+			const wasConnected = get(espConnected);
+			espConnected.set(connected);
+			if (connected && !wasConnected) {
 				console.log('ESP connected');
-				sendStatRequest();
-				sendCurrentFileRequest();
-				ws.send(new Uint8Array([WSCmdType_t.WSCmdType_FILE_META]));
-				ws.send(new Uint8Array([WSCmdType_t.WSCmdType_QUEUE_STATE]));
+				requestFullState();
+			} else if (!connected && wasConnected) {
+				console.warn('ESP disconnected');
 			}
 			break;
+		}
 	}
 }
 
-export function openSocket(websocket_password: string) {
-	ws = new WebSocket('wss://sandtable-websocket.onrender.com', ['webapp', websocket_password]);
-	ws.binaryType = 'arraybuffer';
-	socketState.set(ws.readyState);
+// The relay states the ESP's status unprompted every 5s. Going this long
+// without hearing anything at all therefore means this connection is dead,
+// whatever readyState claims — a socket whose underlying TCP connection has
+// been silently dropped (sleeping laptop, NAT timeout, relay redeployed) can
+// sit in OPEN for minutes before the browser admits it. That window was the
+// reason the ESP's status could only be trusted right after a page reload.
+const RELAY_SILENCE_TIMEOUT_MS = 15000;
+const LIVENESS_CHECK_INTERVAL_MS = 1000;
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 10000;
 
-	ws.onopen = () => {
+let relayUrl = '';
+let relayPassword = '';
+let closedByUs = false;
+let reconnectAttempts = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let livenessTimer: ReturnType<typeof setInterval> | null = null;
+
+// Everything a freshly (re)connected client needs to render a correct view
+// without a page reload: machine state, what's playing and how far in, the
+// pattern index, and the queue.
+function requestFullState() {
+	sendStatRequest();
+	sendCurrentFileRequest();
+	send(new Uint8Array([WSCmdType_t.WSCmdType_FILE_META]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_QUEUE_STATE]));
+}
+
+function noteRelayActivity() {
+	lastRelayMessage.set(Date.now());
+}
+
+// Losing the relay means everything we believe about the ESP is now hearsay.
+function markDisconnected() {
+	espConnected.set(false);
+}
+
+function scheduleReconnect() {
+	if (closedByUs || reconnectTimer) return;
+
+	const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttempts, RECONNECT_MAX_DELAY_MS);
+	reconnectAttempts++;
+	console.log(`Reconnecting in ${delay}ms`);
+	reconnectTimer = setTimeout(() => {
+		reconnectTimer = null;
+		connect();
+	}, delay);
+}
+
+function startLivenessWatchdog() {
+	if (livenessTimer) return;
+	livenessTimer = setInterval(() => {
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		if (Date.now() - get(lastRelayMessage) < RELAY_SILENCE_TIMEOUT_MS) return;
+
+		console.warn('No traffic from the relay — treating this connection as dead');
+		markDisconnected();
+		// close() runs onclose, which is what actually schedules the reconnect.
+		ws.close();
+	}, LIVENESS_CHECK_INTERVAL_MS);
+}
+
+function connect() {
+	// Never stack sockets: a stale one still holds handlers that would keep
+	// writing to the same stores as the live one.
+	if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+
+	const socket = new WebSocket(relayUrl, ['webapp', relayPassword]);
+	ws = socket;
+	socket.binaryType = 'arraybuffer';
+	socketState.set(socket.readyState);
+	noteRelayActivity();
+
+	// Every handler is scoped to the socket that installed it, so one being
+	// reaped late can't overwrite the state of its replacement.
+	const isCurrent = () => ws === socket;
+
+	socket.onopen = () => {
+		if (!isCurrent()) return;
 		console.log('WebSocket connected');
-		socketState.set(ws.readyState);
+		reconnectAttempts = 0;
+		socketState.set(socket.readyState);
+		noteRelayActivity();
 	};
 
-	ws.onmessage = (message) => {
+	socket.onmessage = (message) => {
+		if (!isCurrent()) return;
+		noteRelayActivity();
 		handleBinaryMessage(message.data);
 	};
 
-	ws.onerror = (error) => {
+	socket.onerror = (error) => {
+		if (!isCurrent()) return;
 		console.error('WebSocket Error:', error);
-		socketState.set(ws.readyState);
+		socketState.set(socket.readyState);
 	};
 
-	ws.onclose = ({ code, reason }) => {
+	socket.onclose = ({ code, reason }) => {
+		if (!isCurrent()) return;
 		console.warn(`WebSocket closed (Code: ${code}, Reason: ${reason})`);
-		socketState.set(ws.readyState);
-
-		setTimeout(() => openSocket(websocket_password), 5000);
+		socketState.set(WebSocket.CLOSED);
+		markDisconnected();
+		scheduleReconnect();
 	};
 }
 
+export function openSocket(websocket_password: string, relay_url: string) {
+	relayUrl = relay_url;
+	relayPassword = websocket_password;
+	closedByUs = false;
+	reconnectAttempts = 0;
+	startLivenessWatchdog();
+	connect();
+}
+
 export function closeSocket() {
+	closedByUs = true;
+	if (reconnectTimer) {
+		clearTimeout(reconnectTimer);
+		reconnectTimer = null;
+	}
+	if (livenessTimer) {
+		clearInterval(livenessTimer);
+		livenessTimer = null;
+	}
+	markDisconnected();
 	if (ws) {
 		ws.close();
 		socketState.set(ws.readyState);
@@ -304,40 +433,40 @@ export function closeSocket() {
 }
 
 export function sendFanValue(value: number) {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_FAN, value]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_FAN, value]));
 }
 
 export function sendLedValue(value: number) {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_LED, value]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_LED, value]));
 }
 
 export function sendStart(pattern: string) {
 	const charArray = new TextEncoder().encode(pattern);
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_START, ...charArray, 0x00]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_START, ...charArray, 0x00]));
 }
 
 export function sendPause() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PAUSE]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_PAUSE]));
 }
 
 export function sendResume() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_RESUME]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_RESUME]));
 }
 
 export function sendStop() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_STOP]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_STOP]));
 }
 
 export function sendSkip() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_SKIP]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_SKIP]));
 }
 
 export function sendPrevious() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PREVIOUS]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_PREVIOUS]));
 }
 
 export function sendHome() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_HOME]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_HOME]));
 }
 
 export function sendMove(dx: number, dy: number) {
@@ -345,35 +474,35 @@ export function sendMove(dx: number, dy: number) {
 	view.setUint8(0, WSCmdType_t.WSCmdType_MOVE);
 	view.setInt8(1, dx);
 	view.setInt8(2, dy);
-	ws.send(new Uint8Array(view.buffer));
+	send(new Uint8Array(view.buffer));
 }
 
 export function sendSafemode(safemode: boolean) {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_SAFEMODE, safemode ? 1 : 0]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_SAFEMODE, safemode ? 1 : 0]));
 }
 
 export function sendStatRequest() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_STAT]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_STAT]));
 }
 
 export function sendCurrentFileRequest() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_CURRENT_FILE]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_CURRENT_FILE]));
 }
 
 export function sendDeletePattern(pattern: string) {
 	const charArray = new TextEncoder().encode(pattern);
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_DELETE_FILE, ...charArray, 0x00]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_DELETE_FILE, ...charArray, 0x00]));
 }
 
 export function sendFeedrateValue(value: number) {
 	let view = new DataView(new ArrayBuffer(3));
 	view.setUint8(0, WSCmdType_t.WSCmdType_FEEDRATE);
 	view.setUint16(1, value);
-	ws.send(new Uint8Array(view.buffer));
+	send(new Uint8Array(view.buffer));
 }
 
 export function sendLogLevel(level: boolean) {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_LOG_LEVEL, level ? 1 : 0]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_LOG_LEVEL, level ? 1 : 0]));
 }
 
 export function sendQueueInsert(pattern: string, position: number = 0xffff) {
@@ -383,14 +512,14 @@ export function sendQueueInsert(pattern: string, position: number = 0xffff) {
 	view.setUint16(1, position);
 	new Uint8Array(view.buffer).set(charArray, 3);
 	new Uint8Array(view.buffer)[3 + charArray.length] = 0;
-	ws.send(view.buffer);
+	send(view.buffer);
 }
 
 export function sendQueueRemove(position: number) {
 	let view = new DataView(new ArrayBuffer(3));
 	view.setUint8(0, WSCmdType_t.WSCmdType_QUEUE_REMOVE);
 	view.setUint16(1, position);
-	ws.send(view.buffer);
+	send(view.buffer);
 }
 
 export function sendQueueMove(from: number, to: number) {
@@ -398,23 +527,23 @@ export function sendQueueMove(from: number, to: number) {
 	view.setUint8(0, WSCmdType_t.WSCmdType_QUEUE_MOVE);
 	view.setUint16(1, from);
 	view.setUint16(3, to);
-	ws.send(view.buffer);
+	send(view.buffer);
 }
 
 export function sendQueueClear() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_QUEUE_CLEAR]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_QUEUE_CLEAR]));
 }
 
 export function sendPlayQueue() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PLAY_QUEUE]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_PLAY_QUEUE]));
 }
 
 export function sendPlayShuffle() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_PLAY_SHUFFLE]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_PLAY_SHUFFLE]));
 }
 
 export function sendAutoclean(enabled: boolean) {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_AUTOCLEAN, enabled ? 1 : 0]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_AUTOCLEAN, enabled ? 1 : 0]));
 }
 
 function scaleNum(num: number) {
@@ -453,7 +582,7 @@ async function sendPacket(pointOffset: number, dataBytes: Uint8Array) {
 	message.set(dataBytes, 5);
 	header.setUint32(5 + dataBytes.length, chunkCrc);
 
-	ws.send(message.buffer);
+	if (!send(message.buffer)) throw new Error('Not connected');
 	const ok = await waitForAck();
 	if (!ok) throw new Error(`ESP failed to write chunk at byte offset ${byteOffset}`);
 }
@@ -519,7 +648,8 @@ export async function sendPatternFragments(
 				dataView.setUint8(0, WSCmdType_t.WSCmdType_PATTERN_START);
 				dataView.setUint8(1, isResuming ? 1 : 0);
 				dataView.setUint32(2, pointNums.length * 2);
-				ws.send(new Uint8Array([...new Uint8Array(dataView.buffer), ...charArray, 0x00]));
+				if (!send(new Uint8Array([...new Uint8Array(dataView.buffer), ...charArray, 0x00])))
+					throw new Error('Not connected');
 
 				const startOk = await waitForAck();
 				if (!startOk) {
@@ -572,7 +702,7 @@ export async function sendPatternFragments(
 	let finFailures = 0;
 	while (!finSent) {
 		try {
-			ws.send(
+			const sent = send(
 				new Uint8Array([
 					WSCmdType_t.WSCmdType_PATTERN_FIN,
 					isCleaner ? 1 : 0,
@@ -582,6 +712,7 @@ export async function sendPatternFragments(
 					checksum & 0xff
 				])
 			);
+			if (!sent) throw new Error('Not connected');
 			const ok = await waitForAck();
 			if (!ok) {
 				// Deterministic mismatch on the same data — retrying this same FIN
@@ -606,6 +737,6 @@ export async function sendPatternFragments(
 }
 
 export function sendCancelUpload() {
-	ws.send(new Uint8Array([WSCmdType_t.WSCmdType_CANCEL_UPLOAD]));
+	send(new Uint8Array([WSCmdType_t.WSCmdType_CANCEL_UPLOAD]));
 	sendingPattern.set(false);
 }

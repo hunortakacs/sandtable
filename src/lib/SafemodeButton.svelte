@@ -1,5 +1,5 @@
 <script>
-	import { machineStats } from "./stores";
+	import { espConnected, machineStats } from "./stores";
 	import { sendSafemode } from "./websocket";
 
     function toggleSafemode() {
@@ -9,6 +9,11 @@
 
 </script>
 
-<button class="btn btn-square" aria-label="safemode" onclick={toggleSafemode}>
+<button
+	class="btn btn-square"
+	aria-label="safemode"
+	onclick={toggleSafemode}
+	disabled={!$espConnected}
+>
     <i class="fa-solid {$machineStats.safemode ? 'fa-lock' : 'fa-lock-open'}"></i>
 </button>

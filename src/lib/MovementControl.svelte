@@ -1,8 +1,11 @@
 <script lang="ts">
-	import { machineStats } from '$lib/stores';
+	import { espConnected, machineStats } from '$lib/stores';
 	import { sendHome, sendMove } from './websocket';
 
+	// With the ESP gone, everything below is a command nobody will receive and
+	// a machine state we can no longer vouch for — so nothing here is operable.
 	$: disabled =
+		!$espConnected ||
 		$machineStats.homing ||
 		$machineStats.executing ||
 		(!$machineStats.homed && $machineStats.safemode);

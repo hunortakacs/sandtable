@@ -8,16 +8,17 @@
 		2: { name: 'CLOSING', color: 'text-warning', icon: 'fa-triangle-exlamation' },
 		3: { name: 'CLOSED', color: 'text-error', icon: 'fa-link-slash' }
 	};
-	const machineStates: { [state: number]: string } = {};
+	const unknownState = { name: 'UNKNOWN', color: 'text-error', icon: 'fa-link-slash' };
+	$: socket = states[$socketState] ?? unknownState;
 </script>
 
 <div class="flex gap-2 flex-wrap justify-center">
 	<div class="stats">
 		<div class="stat">
 			<div class="stat-title">Websocket</div>
-			<div class="stat-value {states[$socketState].color} flex items-center gap-2">
-				{states[$socketState].name}
-				<i class="fa-solid {states[$socketState].icon} text-xl"></i>
+			<div class="stat-value {socket.color} flex items-center gap-2">
+				{socket.name}
+				<i class="fa-solid {socket.icon} text-xl"></i>
 			</div>
 		</div>
 	</div>
@@ -27,21 +28,26 @@
 			<div
 				class="stat-value {$espConnected ? 'text-success' : 'text-error'} flex items-center gap-2"
 			>
-				<i class="fa-solid {$espConnected ? 'fa-link' : 'fa-link-slash'}"></i>
+				{$espConnected ? 'ONLINE' : 'OFFLINE'}
+				<i class="fa-solid {$espConnected ? 'fa-link' : 'fa-link-slash'} text-xl"></i>
 			</div>
 		</div>
 	</div>
 	<div class="stats shadow">
 		<div class="stat">
 			<div class="stat-title">X position</div>
-			<div class="stat-value">{$machineStats.homed ? Math.round($position.x) : '-'}</div>
+			<div class="stat-value">
+				{$espConnected && $machineStats.homed ? Math.round($position.x) : '-'}
+			</div>
 			<div class="stat-desc">mm</div>
 		</div>
 	</div>
 	<div class="stats shadow">
 		<div class="stat">
 			<div class="stat-title">Y position</div>
-			<div class="stat-value">{$machineStats.homed ? Math.round($position.y) : '-'}</div>
+			<div class="stat-value">
+				{$espConnected && $machineStats.homed ? Math.round($position.y) : '-'}
+			</div>
 			<div class="stat-desc">mm</div>
 		</div>
 	</div>
@@ -49,7 +55,9 @@
 		<div class="stat">
 			<div class="stat-title">State</div>
 			<div class="stat-value">
-				{#if $machineStats.homing}
+				{#if !$espConnected}
+					<span class="text-error">Offline</span>
+				{:else if $machineStats.homing}
 					Homing
 				{:else if $machineStats.executing}
 					Playing ({$playbackMode === 1 ? 'Queue' : $playbackMode === 2 ? 'Shuffle' : 'Manual'})

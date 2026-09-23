@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { get } from 'svelte/store';
 	import colors from 'tailwindcss/colors';
-	import { machineStats, position, prevPosition } from './stores';
+	import { espConnected, machineStats, patternIndex, position } from './stores';
 	const { orange } = colors;
 
 	export let width = 490;
@@ -16,90 +15,96 @@
 	$: maxWidth = width - line;
 	$: maxHeight = height - line;
 
+	// The two styles the preview is built out of: the part of the path the
+	// machine has already drawn, and the part it hasn't.
+	const TRAVERSED = { stroke: orange[400], fill: orange[300], scale: 1 };
+	const FUTURE = { stroke: orange[300], fill: orange[200], scale: 0.8 };
+	const DOT_RADIUS = 5;
+
 	let useCenteredBounds = true;
 	let lines: string[] = [];
 
-	let canvas: HTMLCanvasElement;
+	// Three stacked layers, because they change at wildly different rates and
+	// mixing them was what broke the preview: the dot and the live segment have
+	// to be erasable every single position update, while the path underneath
+	// them must not be. Drawing all three onto one canvas meant every dot ever
+	// reported stayed on screen as a red smear, and the only way to erase one
+	// was to erase the path with it.
+	//   bgCanvas    — the whole path, FUTURE style. Written once per pattern.
+	//   canvas      — the traversed path, TRAVERSED style. Appended to as the
+	//                 machine confirms coordinates. Also the editor's own
+	//                 drawing surface (manual draw / preview animation).
+	//   fgCanvas    — the live segment from the last confirmed coordinate to
+	//                 the machine, plus the dot. Cleared and redrawn wholesale.
 	let bgCanvas: HTMLCanvasElement;
-	let ctx: CanvasRenderingContext2D | null;
+	let canvas: HTMLCanvasElement;
+	let fgCanvas: HTMLCanvasElement;
 	let bgCtx: CanvasRenderingContext2D | null;
+	let ctx: CanvasRenderingContext2D | null;
+	let fgCtx: CanvasRenderingContext2D | null;
+
 	let drawing = false;
 	let preview = false;
 
+	// True when pointNums is the pattern the machine is actually reading (as
+	// opposed to something loaded into the editor), i.e. when the reported
+	// coordinate index means anything.
+	let livePath = false;
+	// How far the traversed layer has actually been stroked, as a coordinate
+	// index (pointNums[2i], pointNums[2i + 1]). -1 = nothing drawn yet.
+	let trailIndex = -1;
+
+	const coordinateCount = (nums: number[]) => Math.floor(nums.length / 2);
+
 	export function clear() {
-		if (!ctx) return;
 		preview = false;
 		drawing = false;
+		livePath = false;
 		pointNums = [];
 		lines = [];
-		ctx.clearRect(0, 0, canvas.width, canvas.height);
-		bgCtx?.clearRect(0, 0, canvas.width, canvas.height);
+		trailIndex = -1;
+		ctx?.clearRect(0, 0, width, height);
+		bgCtx?.clearRect(0, 0, width, height);
+		renderLive();
 	}
 
-	// Loads the pattern the ESP reports as currently playing, from its own
+	// Adopts the pattern the ESP reports as currently playing, from its own
 	// compiled coordinate bytes (decoded by the caller into raw x/y pairs) —
-	// the only source of truth for what the machine is actually drawing,
-	// since an uploaded/queued pattern has no corresponding static .gcode
-	// asset on the frontend to re-parse. These numbers were already fit to
-	// canvas space by scaleNums() once, at upload time (that's what got
-	// encoded into the .bin the ESP is reading from), so — unlike
-	// processLines()'s freshly-parsed-gcode path — they must NOT be scaled
-	// again here.
+	// the only source of truth for what the machine is drawing, since an
+	// uploaded/queued pattern has no corresponding static .gcode asset on the
+	// frontend to re-parse. These numbers were already fit to canvas space by
+	// scaleNums() once, at upload time (that's what got encoded into the .bin
+	// the ESP reads from), so — unlike processLines()'s freshly-parsed-gcode
+	// path — they must NOT be scaled again here.
 	//
-	// The whole shape is redrawn fresh on the faint background layer (a pure
-	// function of pointNums, so it's safe to call again for the same pattern
-	// — e.g. on every reconnect — unlike compositing/fading previous
-	// frames), and the portion already traversed (per `progress`, a byte
-	// offset from the firmware, 4 bytes/coordinate) is instantly filled in on
-	// the foreground layer in the darker "already drawn" color. This is what
-	// makes progress survive a page reload instead of starting the preview
-	// from scratch.
-	export function loadDeviceCoordinates(rawPointNums: number[], progress: number) {
+	// Progress is not a parameter: it comes from the patternIndex store, which
+	// the firmware keeps up to date, so a pattern loaded halfway through (page
+	// refresh, reconnect) paints its traversed portion immediately and then
+	// just keeps following along.
+	export function loadDeviceCoordinates(rawPointNums: number[]) {
 		pointNums = rawPointNums;
-		if (!ctx || !bgCtx || !canvas) return;
-
-		ctx.clearRect(0, 0, canvas.width, canvas.height);
-		bgCtx.clearRect(0, 0, canvas.width, canvas.height);
-		for (let i = 0; i < pointNums.length - 2; i += 2) {
-			draw(pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3], orange[300], orange[200], bgCtx);
-		}
-
-		if (progress > 0 && pointNums.length >= 2) {
-			// progress is a hard lower bound — the machine has *definitely*
-			// reached this point, but we don't know how far it's gotten past
-			// it. Fill in solid up to there, then connect straight to the
-			// machine's actual live reported position for the remainder,
-			// rather than guessing at some further index — matching what the
-			// live position-tracking draw below does continuously anyway.
-			const certainIndex = Math.min(Math.floor(progress / 4) * 2, pointNums.length - 2);
-			drawUpTo(certainIndex);
-			const livePos = get(position);
-			draw(
-				pointNums[certainIndex],
-				pointNums[certainIndex + 1],
-				livePos.x,
-				livePos.y,
-				orange[400],
-				orange[300]
-			);
-		}
-	}
-
-	// Instantly (no animation) strokes pointNums[0..index] on the foreground
-	// layer in the darker "already traversed" color — used both to fast-
-	// forward a freshly (re)loaded pattern to wherever the machine has
-	// actually already gotten to (e.g. after a page refresh), matching the
-	// color live position ticks use for the same purpose.
-	export function drawUpTo(index: number) {
-		if (!ctx || pointNums.length < 4 || index <= 0) return;
-		const end = Math.min(index, pointNums.length - 2);
-		for (let i = 0; i < end; i += 2) {
-			draw(pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3], orange[400], orange[300]);
-		}
+		livePath = true;
+		preview = false;
+		trailIndex = -1;
+		renderPath();
 	}
 
 	export function setCenteredBounds(centered: boolean) {
 		useCenteredBounds = centered;
+	}
+
+	export function processLines(newLines: string[], skipAutoPreview = false) {
+		lines = newLines;
+		recalculate(skipAutoPreview);
+	}
+
+	export function recalculate(skipAutoPreview = false) {
+		if (lines.length === 0) return;
+		livePath = false;
+		trailIndex = -1;
+		pointNums = parseGcode(lines);
+		renderPath();
+		if (!skipAutoPreview) triggerPreview();
 	}
 
 	async function preciseMessageDelay(iterations: number) {
@@ -112,64 +117,159 @@
 		}
 	}
 
+	// Editor-only animation: traces the loaded shape in the traversed style so
+	// you can see the drawing order. Unrelated to what the machine is doing.
 	export async function triggerPreview(delay = 0) {
 		if (!ctx || pointNums.length < 4) return;
-		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		livePath = false;
+		trailIndex = -1;
+		ctx.clearRect(0, 0, width, height);
 		preview = true;
-		for (let i = 0; i < pointNums.length - 2; i += 2) {
-			draw(pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3]);
+		for (let i = 0; i < coordinateCount(pointNums) - 1; i++) {
+			drawSegment(ctx, i, TRAVERSED);
 			if (delay > 0) await preciseMessageDelay(delay);
-			if (!preview) {
-				return;
-			}
+			if (!preview) return;
 		}
 		preview = false;
 	}
 
-	export function processLines(newLines: string[], skipAutoPreview = false) {
-		lines = newLines;
-		recalculate(skipAutoPreview);
-	}
+	// ---------------------------------------------------------------------
+	// Rendering
+	// ---------------------------------------------------------------------
 
-	export function recalculate(skipAutoPreview = false) {
-		if (lines.length === 0) return;
-		pointNums = parseGcode(lines);
-		if (!skipAutoPreview) triggerPreview();
-	}
-
-	function draw(
+	function stroke(
+		targetCtx: CanvasRenderingContext2D,
 		x1: number,
 		y1: number,
 		x2: number,
 		y2: number,
-		stroke: string = orange[300],
-		fill: string = orange[200],
-		targetCtx: CanvasRenderingContext2D | null = ctx
+		style: { stroke: string; fill: string; scale: number }
 	) {
-		if (!targetCtx) return;
-		const ctx = targetCtx;
+		targetCtx.beginPath();
+		targetCtx.moveTo(x1, y1);
+		targetCtx.lineTo(x2, y2);
+		targetCtx.strokeStyle = style.stroke;
+		targetCtx.lineWidth = line * style.scale;
+		targetCtx.stroke();
 
-		ctx.beginPath();
-		ctx.moveTo(x1, y1);
-		ctx.lineTo(x2, y2);
-		ctx.strokeStyle = stroke;
-		ctx.lineWidth = line;
-		ctx.stroke();
+		targetCtx.strokeStyle = style.fill;
+		targetCtx.lineWidth = 0.8 * line * style.scale;
+		targetCtx.stroke();
 
-		ctx.strokeStyle = fill;
-		ctx.lineWidth = 0.8 * line;
-		ctx.stroke();
-
-		ctx.closePath();
+		targetCtx.closePath();
 	}
 
-	function manualDraw(x: number, y: number) {
-		if (!drawing) return;
+	// Segment from coordinate `index` to coordinate `index + 1`.
+	function drawSegment(
+		targetCtx: CanvasRenderingContext2D,
+		index: number,
+		style: { stroke: string; fill: string; scale: number }
+	) {
+		const i = index * 2;
+		stroke(targetCtx, pointNums[i], pointNums[i + 1], pointNums[i + 2], pointNums[i + 3], style);
+	}
 
+	// Repaints the two slow layers from scratch: the whole shape in FUTURE
+	// style underneath, and the traversed prefix on top of it.
+	function renderPath() {
+		if (!ctx || !bgCtx) return;
+		bgCtx.clearRect(0, 0, width, height);
+		ctx.clearRect(0, 0, width, height);
+		trailIndex = -1;
+
+		for (let i = 0; i < coordinateCount(pointNums) - 1; i++) {
+			drawSegment(bgCtx, i, FUTURE);
+		}
+
+		renderTrail();
+		renderLive();
+	}
+
+	// Extends (or, if the machine went backwards, rebuilds) the traversed layer
+	// so it ends exactly at the last coordinate the firmware has confirmed.
+	function renderTrail() {
+		if (!ctx || !livePath) return;
+
+		const target = Math.min($patternIndex, coordinateCount(pointNums) - 1);
+		if (target === trailIndex) return;
+
+		if (target < trailIndex) {
+			// Restarted, stepped back, or switched pattern: nothing of the old
+			// trail can be trusted, so start over rather than leaving orphaned
+			// strokes behind.
+			ctx.clearRect(0, 0, width, height);
+			trailIndex = -1;
+		}
+		if (target < 0) return;
+
+		for (let i = Math.max(trailIndex, 0); i < target; i++) {
+			drawSegment(ctx, i, TRAVERSED);
+		}
+		trailIndex = target;
+	}
+
+	// The only layer that is cleared on every update: the stretch the machine
+	// is currently traversing (from the last confirmed coordinate to where it
+	// actually is), and the dot itself — always last, so it sits above
+	// everything else.
+	function renderLive() {
+		if (!fgCtx) return;
+		fgCtx.clearRect(0, 0, width, height);
+
+		if (livePath && trailIndex >= 0 && trailIndex < coordinateCount(pointNums)) {
+			const i = trailIndex * 2;
+			stroke(fgCtx, pointNums[i], pointNums[i + 1], $position.x, $position.y, TRAVERSED);
+		}
+
+		// The machine only knows where it is once homing has established an
+		// origin, and we only know that while the ESP is actually reporting —
+		// before either, any dot we drew would be a guess.
+		if (!$machineStats.homed || !$espConnected) return;
+
+		fgCtx.beginPath();
+		fgCtx.arc($position.x, $position.y, DOT_RADIUS, 0, 2 * Math.PI);
+		fgCtx.fillStyle = 'red';
+		fgCtx.fill();
+		fgCtx.closePath();
+	}
+
+	// Every live input funnels through here, so the trail, the live segment and
+	// the dot are always painted from the same snapshot and can't disagree. The
+	// arguments exist purely to declare what this depends on.
+	function renderFrame(..._deps: unknown[]) {
+		renderTrail();
+		renderLive();
+	}
+
+	$: renderFrame(
+		$position,
+		$patternIndex,
+		$machineStats.homed,
+		$espConnected,
+		pointNums,
+		livePath,
+		fgCtx
+	);
+
+	// ---------------------------------------------------------------------
+	// Editor input / gcode parsing
+	// ---------------------------------------------------------------------
+
+	function manualDraw(x: number, y: number) {
+		if (!drawing || !ctx) return;
+
+		livePath = false;
 		if (pointNums.length == 0) {
-			draw(x, y, x, y);
+			stroke(ctx, x, y, x, y, TRAVERSED);
 		} else {
-			draw(pointNums[pointNums.length - 2], pointNums[pointNums.length - 1], x, y);
+			stroke(
+				ctx,
+				pointNums[pointNums.length - 2],
+				pointNums[pointNums.length - 1],
+				x,
+				y,
+				TRAVERSED
+			);
 		}
 		pointNums.push(x, y);
 		pointNums = pointNums; // trigger reactivity
@@ -265,39 +365,30 @@
 		return [x, invertedY];
 	}
 
+	// The machine's origin is bottom-left; the canvas's is top-left. Flipping
+	// the context once here means every coordinate — pattern points and live
+	// position alike — is used verbatim, in machine millimetres, which is also
+	// exactly the pixel space patterns were scaled into at upload time.
+	function prepare(target: HTMLCanvasElement, alpha = 1): CanvasRenderingContext2D | null {
+		const context = target.getContext('2d');
+		if (!context) return null;
+		context.lineJoin = 'round';
+		context.lineCap = 'round';
+		context.globalAlpha = alpha;
+		context.translate(0, target.height);
+		context.scale(1, -1);
+		return context;
+	}
+
 	onMount(() => {
-		ctx = canvas.getContext('2d');
-		if (ctx) {
-			ctx.lineJoin = 'round';
-			ctx.lineCap = 'round';
-			ctx.globalAlpha = 0.9;
-			ctx.translate(0, canvas.height);
-			ctx.scale(1, -1);
-		}
-		bgCtx = bgCanvas.getContext('2d');
-		if (bgCtx) {
-			bgCtx.lineJoin = 'round';
-			bgCtx.lineCap = 'round';
-			bgCtx.translate(0, bgCanvas.height);
-			bgCtx.scale(1, -1);
-		}
-	});
-
-	position.subscribe(($position) => {
-		if (!ctx) return;
-		if ($machineStats.homing || !$machineStats.executing) return;
-
-		draw($prevPosition.x, $prevPosition.y, $position.x, $position.y, orange[400], orange[300]);
-
-		ctx.beginPath();
-		ctx.arc($position.x, $position.y, 4, 0, 2 * Math.PI, true);
-		ctx.fillStyle = 'red';
-		ctx.fill();
-		ctx.closePath();
+		bgCtx = prepare(bgCanvas);
+		ctx = prepare(canvas, 0.9);
+		fgCtx = prepare(fgCanvas);
+		renderPath();
 	});
 
 	function startManualDraw() {
-		if (preview) return;
+		if (preview || livePath) return;
 		drawing = true;
 	}
 
@@ -324,7 +415,16 @@
 		ontouchend={stopManualDraw}
 		{width}
 		{height}
-		class="touch-none max-w-[490px] w-full relative {preview ? 'pointer-events-none' : ''}"
+		class="touch-none max-w-[490px] w-full relative {preview || livePath
+			? 'pointer-events-none'
+			: ''}"
+	>
+	</canvas>
+	<canvas
+		bind:this={fgCanvas}
+		{width}
+		{height}
+		class="touch-none max-w-[490px] w-full absolute inset-0 pointer-events-none"
 	>
 	</canvas>
 </div>

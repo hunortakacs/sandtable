@@ -1,26 +1,44 @@
 <script lang="ts">
-	import { feedrate } from './stores';
+	import { espConnected, feedrate } from './stores';
 	import { sendFeedrateValue } from './websocket';
+	import { createEchoGate, createThrottledSender } from './liveControl';
 
 	const min = 200;
 	const max = 4000;
 
+	const sender = createThrottledSender(sendFeedrateValue);
+	const echo = createEchoGate();
+
 	let sliding = false;
-	$: localValue = 0;
-	$: if(!sliding) {
-		localValue = $feedrate
+	let localValue = 0;
+
+	// Follow the machine only while it isn't us driving it — see createEchoGate.
+	$: if (!sliding && echo.accepts($feedrate)) {
+		localValue = $feedrate;
 	}
 	$: feedrateRatio = (localValue - min) / (max - min);
 	$: numberInput = localValue;
-	
+
+	function emit(value: number, final: boolean) {
+		echo.sent(value);
+		if (final) sender.commit(value);
+		else sender.push(value);
+	}
+
 	function checkAndSend() {
 		if (numberInput < min || numberInput > max) return;
-		sendFeedrateValue(numberInput);
+		localValue = numberInput;
+		emit(numberInput, true);
 	}
 
 	function slideInput() {
 		sliding = true;
-		sendFeedrateValue(localValue);
+		emit(localValue, false);
+	}
+
+	function slideEnd() {
+		sliding = false;
+		emit(localValue, true);
 	}
 
 	const r = 50;
@@ -39,7 +57,8 @@
 		bind:value={localValue}
 		class="range range-sm"
 		oninput={slideInput}
-		onchange={() => (sliding = false)}
+		onchange={slideEnd}
+		disabled={!$espConnected}
 	/>
 	<svg xmlns="http://www.w3.org/2000/svg" class="w-10 aspect-square" viewBox="0 0 {2 * r} {2 * r}">
 		<path
@@ -55,7 +74,14 @@
 	</svg>
 
 	<form class="contents" onsubmit={checkAndSend}>
-		<input type="number" {min} {max} class="badge min-w-14 text-center" bind:value={numberInput} />
+		<input
+			type="number"
+			{min}
+			{max}
+			class="badge min-w-14 text-center"
+			bind:value={numberInput}
+			disabled={!$espConnected}
+		/>
 	</form>
 </div>
 
